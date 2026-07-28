@@ -1,3 +1,5 @@
+"""Feishu event parsing and long-connection gateway."""
+
 from __future__ import annotations
 
 import json
@@ -8,8 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .config import AppConfig
-from .models import InboundMessage
+from ..core.config import AppConfig
+from ..core.models import InboundMessage
 
 LOGGER = logging.getLogger(__name__)
 

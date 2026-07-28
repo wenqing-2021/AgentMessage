@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_message.feishu import FeishuGateway, parse_receive_event
+from agent_message.channels.feishu import FeishuGateway, parse_receive_event
 
 from tests.helpers import make_config
 

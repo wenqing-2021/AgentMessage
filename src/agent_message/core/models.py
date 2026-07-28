@@ -1,3 +1,5 @@
+"""Shared domain models used across AgentMessage modules."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -84,3 +86,37 @@ class OutboxMessage:
     id: int
     chat_id: str
     content: str
+
+
+@dataclass(frozen=True)
+class GpuJob:
+    id: int
+    task_id: str
+    run_id: int | None
+    status: str
+    pid: int | None
+    command_summary: str
+    cwd: str
+    log_path: Path
+    started_at: str
+    finished_at: str | None
+    exit_code: int | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ContainerJob:
+    id: int
+    task_id: str
+    run_id: int | None
+    status: str
+    pid: int | None
+    container_pid: int | None
+    container_name: str
+    command_summary: str
+    cwd: str
+    log_path: Path
+    started_at: str
+    finished_at: str | None
+    exit_code: int | None
+    error: str | None

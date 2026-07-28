@@ -1,32 +1,108 @@
-# AgentMessage
+<p align="center">
+  <img src="assets/img/ChatGPT%20Image%202026%E5%B9%B48%E6%9C%882%E6%97%A5%2013_11_44.png" width="100%" alt="AgentMessage：飞书机器人连接 WSL 中的 Codex/Qoder，并可选使用 Docker 或 GPU 运行时">
+</p>
 
-将飞书企业自建应用的单聊消息安全地转发给 WSL 中托管的 Codex CLI 或 Qoder CLI 任务，并把状态与最终反馈发回飞书。
+<h1 align="center">AgentMessage</h1>
 
-## 特性
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/README-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2ea44f" alt="简体中文"></a>
+  <a href="README_EN.md"><img src="https://img.shields.io/badge/README-English-555555" alt="English"></a>
+</p>
 
-- 飞书长连接：不需要公网入站端口或内网穿透。
-- 本地项目白名单：飞书只能引用 `projects.toml` 中已登记的项目别名。
-- SQLite 持久化：任务、session ID、消息队列、入站去重、当前任务和发件箱均可恢复。
-- 多项目并行、单项目串行；直接普通文本可进入长期默认 Codex 对话，选中任务后则继续该任务，同项目不会写入冲突。
-- Codex 和 Qoder 的无交互会话适配；完整 JSONL 在本地 `var/logs/`，飞书只接收生命周期和最终摘要。
-- 飞书进度更新：Codex 会话、分析、命令/文件操作和面向用户的中间说明会以限频消息发送到单聊。
-- 默认不使用 YOLO / 绕过权限模式；Codex 工具网络由 `codex_tool_network` 显式控制，Qoder 的 Bash 工具使用无网络命名空间。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/package%20manager-uv-DE5FE9" alt="uv">
+  <img src="https://img.shields.io/badge/code%20style-PEP%208-306998" alt="Code style: PEP 8">
+  <img src="https://img.shields.io/badge/tests-unittest-6C8549" alt="Tests: unittest">
+  <img src="https://img.shields.io/badge/Docker-optional-2496ED?logo=docker&logoColor=white" alt="Docker optional">
+  <img src="https://img.shields.io/badge/platform-WSL%20%7C%20Linux-FCC624?logo=linux&logoColor=black" alt="Platform: WSL and Linux">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT License"></a>
+</p>
+
+AgentMessage 将飞书机器人单聊消息转发给 WSL 中的 Codex CLI 或 Qoder CLI，并把任务进度和结果发回飞书。项目命令也可以在已有 Docker 容器中执行。它使用飞书长连接，不需要公网 IP、端口或回调 URL。
+
+主要能力：
+
+- 飞书普通文本按项目的 `default_agent` 与 Codex 或 Qoder 长期对话。
+- 项目路径使用本地白名单，飞书不能提交任意路径。
+- 保存任务、Agent session ID、消息队列和日志；不同项目可并行，同一项目串行。
+- 可在终端恢复飞书创建的同一个 Codex 或 Qoder session。
+- 可选 Bubblewrap GPU runner，让 Codex/Qoder 在隔离环境中运行 CUDA/JAX 命令。
+- 可选 Docker container runner，让 Codex/Qoder 在宿主读写 bind-mounted 源码、在项目容器中执行命令。
+
+## 代码结构
+
+- `core/`：配置、领域模型和 SQLite 持久化。
+- `channels/`：飞书等消息通道。
+- `orchestration/`：命令解析、消息路由、任务调度和服务编排。
+- `agents/`：Codex/Qoder 适配器及其辅助入口。
+- `runtimes/`：GPU 与 Docker 的隔离执行策略、runner 和 MCP 服务。
+- `cli.py`：面向用户的统一命令行入口。
+
+架构边界、扩展方法和开发检查清单请阅读 [`AGENTS.md`](AGENTS.md)。
 
 ## 安装与配置
 
+要求 Python 3.10+、`uv`，以及至少一个已安装并登录的 Codex CLI 或 Qoder CLI。只需使用配置中 `allowed_agents` 列出的 CLI。
+
 ```bash
-cd /home/moss_ubuntu/workspace/AgentMessage
+cd /path/to/AgentMessage
 uv sync
+codex login                         # 使用 Codex 时
+qodercli login                      # 使用 Qoder 时
 cp config/projects.example.toml config/projects.toml
 vim config/projects.toml
 chmod 600 config/projects.toml
 ```
 
-在 Vim 中将每个 `path` 改为真实、绝对的项目目录，并将 `default_chat_project` 设为其中一个项目别名，然后保存退出。例如项目段落名是 `[projects.website]` 时，填写 `default_chat_project = "website"`。飞书可使用的项目只能在该文件登记，不能从消息中传路径。
+最小配置示例：
 
-默认 `codex_tool_network = false`：Codex 生成的工具命令不能访问网络。只对你信任的项目需要网络访问时，改为 `codex_tool_network = true` 并重启服务；这会允许 Codex 的工具访问外部网络，但不会解除项目白名单或 `workspace-write` 文件权限限制。
+```toml
+[service]
+state_dir = "var"
+log_dir = "var/logs"
+default_chat_project = "website"
+codex_tool_network = false
+stop_grace_seconds = 10
+final_message_limit = 3500
 
-在仓库外创建并使用 `vim` 编辑凭证文件 `~/.config/agent-message/feishu.env`：
+[projects.website]
+path = "/home/alice/workspace/website"
+default_agent = "qoder"
+allowed_agents = ["codex", "qoder"]
+
+[projects.your_proj_name]
+path = "/home/alice/workspace/your_proj_name"
+default_agent = "qoder"
+allowed_agents = ["codex", "qoder"]
+gpu_enabled = true
+gpu_network = true
+gpu_timeout_seconds = 86400
+
+[projects.container_project]
+path = "/home/alice/workspace/container_project"
+default_agent = "qoder"
+allowed_agents = ["codex", "qoder"]
+container_name = "container_project_dev"
+container_path = "/workspace/container_project"
+container_auto_start = true
+container_timeout_seconds = 86400
+```
+
+- `website`、`your_proj_name` 是项目别名，不是目录路径。
+- `path` 必须是本机存在的绝对路径。
+- `default_chat_project` 是首次直接发送普通文本时使用的项目，实际 Agent 由该项目的 `default_agent` 决定。
+- `default_agent` 必须出现在 `allowed_agents` 中；Codex-only、Qoder-only 和二者并存都受支持。
+- `codex_tool_network = true` 允许 Codex 的普通工具联网，仅对可信项目启用。
+- `gpu_network` 省略时默认为 `true`；设置为 `false` 才会隔离 GPU 命令网络。
+- Qoder 的普通 Bash 默认允许联网，但仍禁止 `sudo`、危险 Git 操作和发布命令。
+- 修改 `projects.toml` 后需要重启服务。
+- `container_name` 只引用已有容器；AgentMessage 不创建、重建或删除容器。
+- `container_path` 是项目在容器内的绝对路径；每次执行前都会用 bind mount 校验。
+
+Qoder 的 `auto` 权限、工具白名单和严格 MCP 行为以官方的 [Permissions](https://docs.qoder.com/en/cli/permissions) 与 [MCP Servers](https://docs.qoder.com/en/cli/mcp-servers) 契约为准。
+
+凭证必须放在仓库外：
 
 ```bash
 mkdir -p ~/.config/agent-message
@@ -34,307 +110,236 @@ chmod 700 ~/.config/agent-message
 vim ~/.config/agent-message/feishu.env
 ```
 
-在 Vim 中写入：
+写入：
 
 ```text
 AGENT_MESSAGE_FEISHU_APP_ID=cli_xxx
 AGENT_MESSAGE_FEISHU_APP_SECRET=xxx
-# 首次可留空。随后用本地 authorize 命令增加自己的 open_id。
 AGENT_MESSAGE_ALLOWED_OPEN_IDS=
 ```
 
-保存退出后执行：
+`AGENT_MESSAGE_ALLOWED_OPEN_IDS` 首次可以留空，稍后用 `authorize` 添加自己的 `open_id`。
+这些变量只供飞书桥接服务使用；AgentMessage 启动 Codex/Qoder 时会从子进程环境中移除它们。
 
 ```bash
 chmod 600 ~/.config/agent-message/feishu.env
-```
-
-将环境变量加载到当前 shell 后，先检查本地条件：
-
-```bash
 set -a; source ~/.config/agent-message/feishu.env; set +a
 uv run agent-message doctor
 ```
 
-Qoder 是可选项：安装、登录 `qodercli` 后会自动在 `doctor` 中显示。没有 Qoder 时，Codex 仍可正常使用。
+## 连接飞书
 
-## 首次绑定：飞书应用 ↔ 此 WSL2
+在[飞书开放平台开发者后台](https://open.feishu.cn/app)完成：
 
-这套方案**没有**“填写 WSL IP、开放端口或配置回调 URL”的步骤。WSL 中的服务会带着
-`App ID` 和 `App Secret` 主动连接飞书；只要该进程持续运行，这台 WSL2 就是该机器人的运行端。
+1. 创建企业自建应用并添加机器人能力。
+2. 开通 `im:message.p2p_msg:readonly` 和 `im:message:send_as_bot`。
+3. 在事件订阅中选择“使用长连接接收事件”，添加 `im.message.receive_v1`。
+4. 创建并发布应用版本，将机器人可用范围限制为自己。
 
-按以下顺序完成首次绑定：
-
-1. 在飞书开发者后台打开同一个企业自建应用，进入 **凭证与基础信息**，复制 `App ID` 和 `App Secret`。
-2. 将这两个值填入 `~/.config/agent-message/feishu.env`，不要填入 `projects.toml`，也不要提交到 Git。
-3. 在 **事件订阅** 中选择 **使用长连接接收事件**，不要填写 Request URL；添加 `im.message.receive_v1` 并发布应用版本。
-4. 在 WSL 项目目录执行以下命令，让本机主动连上飞书：
-
-   ```bash
-   cd /home/moss_ubuntu/workspace/AgentMessage
-   set -a; source ~/.config/agent-message/feishu.env; set +a
-   uv run agent-message doctor
-   uv run agent-message run
-   ```
-
-   这个终端必须保持运行。首次测试时不要用 `Ctrl-C` 停止它。
-5. 在个人飞书客户端主动打开与机器人的单聊，并发送任意一条文本，例如 `/help`。外部/个人用户必须先发起会话，机器人不能先主动私聊。
-6. 另开一个 WSL 终端，执行：
-
-   ```bash
-   cd /home/moss_ubuntu/workspace/AgentMessage
-   uv run agent-message pending-senders
-   uv run agent-message authorize ou_xxx
-   ```
-
-   将上一个命令显示的 `ou_xxx` 原样粘贴给 `authorize`。现在再在飞书发送 `/help`；收到帮助文本即表示绑定和权限均成功。
-
-之后请将服务改为 systemd 或 tmux 常驻运行；WSL/电脑休眠、关机或服务退出时，机器人无法接收消息。
-
-## 飞书后台配置清单
-
-1. 创建**企业自建应用**，添加“机器人”能力，并把机器人可用范围限制为自己。
-2. 开通应用权限 `im:message.p2p_msg:readonly` 和 `im:message:send_as_bot`。
-3. 在“事件订阅”选择**使用长连接接收事件**，添加 `im.message.receive_v1`，创建应用版本并发布。
-4. 按上一节“首次绑定”启动 WSL 服务并完成 `open_id` 的本地授权。
-
-未被授权的消息会被去重但不会执行，也不会返回内容。
-
-## 运行
-
-前台运行（首次接入时推荐）：
+首次在 WSL 前台启动：
 
 ```bash
+cd /path/to/AgentMessage
 set -a; source ~/.config/agent-message/feishu.env; set +a
 uv run agent-message run
 ```
 
-WSL 启用 user systemd 后：
+在飞书中给机器人发送 `/help`，然后另开终端授权发送者：
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/agent-message.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now agent-message
-journalctl --user -u agent-message -f
+cd /path/to/AgentMessage
+uv run agent-message pending-senders
+uv run agent-message authorize ou_xxx
 ```
 
-### systemd 找不到已安装的 Codex：配置 PATH
+再次发送 `/help`，收到回复即表示绑定成功。机器人由 WSL 主动连接飞书，不需要填写 WSL IP。
 
-systemd 不会读取你的 `~/.bashrc` 或交互式终端的 `PATH`。因此，即使终端中可以运行 `codex`，机器人服务也可能报“找不到 codex”。`EnvironmentFile=%h/.config/agent-message/feishu.env` **必须保留**，它用于加载飞书 App ID 和 App Secret；`PATH` 应作为紧接着的新一行添加，而不是替换它。
+## systemd 常驻运行
 
-先在与 Codex 相同的 WSL 用户终端中查看 Codex 的实际安装路径：
-
-```bash
-command -v codex
-dirname "$(command -v codex)"
-```
-
-例如第一条输出 `/home/alice/.local/bin/codex`，第二条输出 `/home/alice/.local/bin`。编辑已安装的 unit：
-
-```bash
-vim ~/.config/systemd/user/agent-message.service
-```
-
-确认 `[Service]` 中包含下面两行。将 `PATH=` 最前面的目录替换成上一步 `dirname` 的输出；其他目录保留。**不要**把 `feishu.env` 的路径替换成 Codex 路径。
-
-```ini
-EnvironmentFile=%h/.config/agent-message/feishu.env
-Environment="PATH=/home/alice/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-```
-
-对于常见的 `~/.local/bin/codex` 安装，仓库自带的 unit 已使用可移植的 `%h/.local/bin`。若实际安装在 `~/.npm-global/bin`、`/opt/.../bin` 等其他目录，则仍以 `dirname "$(command -v codex)"` 的输出为准。
-
-保存后使修改生效：
-
-```bash
-systemctl --user daemon-reload
-systemctl --user restart agent-message
-systemctl --user status agent-message --no-pager
-```
-
-若 WSL 没有 user systemd，可在持久 tmux 会话中使用同一条 `uv run agent-message run` 命令。
-
-如果执行 `systemctl --user daemon-reload` 时显示 `Failed to connect to bus: No such file or directory`，说明
-当前 WSL 没有启动 systemd；不是 `agent-message.service` 的错误。任选以下一种方式。
-
-#### 方式 A：立即使用 tmux
-
-```bash
-tmux new-session -d -s agent-message 'cd /home/moss_ubuntu/workspace/AgentMessage && set -a && . ~/.config/agent-message/feishu.env && set +a && exec uv run agent-message run'
-tmux capture-pane -pt agent-message
-```
-
-常用管理命令：
-
-```bash
-tmux attach -t agent-message   # 查看实时输出；按 Ctrl-b 后按 d 可离开但不停止服务
-tmux ls                        # 查看会话是否仍在运行
-tmux kill-session -t agent-message  # 停止服务
-```
-
-#### 方式 B：在 WSL2 启用 systemd
-
-先在 WSL 内编辑现有配置（保留其他节，例如 `[network]`）：
-
-```bash
-sudo vim /etc/wsl.conf
-```
-
-添加：
+WSL 必须启用 systemd。若 `systemctl --user` 报 `Failed to connect to bus`，在 `/etc/wsl.conf` 中加入：
 
 ```ini
 [boot]
 systemd=true
 ```
 
-保存退出 Vim 后，在 **Windows PowerShell** 中执行：
+然后在 Windows PowerShell 执行 `wsl --shutdown`，重新打开 WSL。
 
-```powershell
-wsl --version
-wsl --shutdown
-```
-
-若 WSL 版本低于 `0.67.6`，先在 Windows PowerShell 中执行 `wsl --update`。重新打开 WSL 后，确认：
+安装用户服务：
 
 ```bash
-ps -p 1 -o comm=
-```
-
-输出应为 `systemd`。此时再运行本节前面的 `systemctl --user daemon-reload`、`enable --now` 命令。若
-希望用户服务在没有登录终端时仍保留其 user manager，可额外执行一次：
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-### 更新服务
-
-代码或配置更新后，服务必须重启才能加载新内容；通常直接使用 `restart`，不需要先单独执行
-`stop`：
-
-```bash
-cd /home/moss_ubuntu/workspace/AgentMessage
-systemctl --user restart agent-message
+cd /path/to/AgentMessage
+mkdir -p ~/.config/systemd/user
+cp deploy/agent-message.service ~/.config/systemd/user/
+vim ~/.config/systemd/user/agent-message.service
+systemctl --user daemon-reload
+systemctl --user enable --now agent-message
 systemctl --user status agent-message --no-pager
 ```
 
-重启会中断当前正在运行的 agent 任务。若任务不应中断，请先等待其完成；中断任务的 session
-上下文会保留，可稍后从飞书继续，但不会自动重跑。
+仓库自带 unit 默认使用 `%h/workspace/AgentMessage`。如果仓库位于其他目录，必须在 unit 中同步修改 `WorkingDirectory` 和 `ExecStart`。
 
-不同更新类型对应的命令：
+systemd 不读取交互式 shell 的 `PATH`。查看已启用 Agent 的路径：
 
 ```bash
-# 仅修改 Python 源码
+command -v codex
+command -v qodercli
+dirname "$(command -v codex)"
+dirname "$(command -v qodercli)"
+```
+
+确认 unit 的 `[Service]` 至少包含：
+
+```ini
+EnvironmentFile=%h/.config/agent-message/feishu.env
+Environment="PATH=/home/alice/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+```
+
+确保 `PATH` 包含 `codex`/`qodercli` 所在目录。`EnvironmentFile` 必须保留，不能替换成 CLI 路径。
+
+查看实时日志：
+
+```bash
+journalctl --user -u agent-message -f
+```
+
+按 `Ctrl-C` 只退出日志查看，不会停止服务。
+
+更新后通常直接重启，无需先停止：
+
+```bash
+# Python、配置或环境变量有变化
 systemctl --user restart agent-message
 
-# pyproject.toml 或 uv.lock 有变
-cd /home/moss_ubuntu/workspace/AgentMessage
+# pyproject.toml 或 uv.lock 有变化
 uv sync
 systemctl --user restart agent-message
 
-# 修改 feishu.env 或 config/projects.toml
-systemctl --user restart agent-message
-
-# 修改 systemd unit 文件本身
+# unit 文件有变化
 cp deploy/agent-message.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user restart agent-message
 ```
 
-该 unit 没有定义 `reload` 行为，请使用 `restart`。`journalctl --user -u agent-message -f` 中按
-`Ctrl-C` 只会退出日志查看，不会停止机器人服务。
+重启会中断正在运行的任务，但会保留 Codex/Qoder session，之后可以继续；任务不会自动重跑。
 
-## 飞书命令：先理解这 4 个概念
+## 飞书使用示例
 
-- **项目别名**：`projects.toml` 中项目路径的短名称。例如 `[projects.website]` 的项目别名是 `website`。它不是目录路径，飞书不能发送任意路径。
-- **任务**：一次独立的 Codex 或 Qoder 工作会话，例如“修复首页登录按钮在手机端溢出”。
-- **任务 ID**：创建任务后机器人返回的唯一编号，例如 `a1b2c3d4`。用它切换、查看日志或停止这个任务。
-- **当前任务**：你此刻直接发送普通文本时，机器人会继续发送到的任务。
+四个概念：
 
-### 直接和 Codex 长期聊天
+- **项目别名**：`projects.toml` 中的短名称，例如 `website`。
+- **任务**：一次独立的 Codex/Qoder 工作会话。
+- **任务 ID**：机器人返回的唯一编号，例如 `a1b2c3d4`。
+- **当前任务**：直接发送普通文本时将继续的任务。
 
-首次直接发送一条普通文本，不必先写命令：
+直接与默认项目的 `default_agent` 长期聊天（以下项目配置为 Qoder）：
 
 ```text
-你：检查当前项目结构，告诉我主要入口文件，不要修改文件。
-机器人：默认 Codex 对话 a1b2c3d4 已排队：website。后续可直接发送普通文本继续……
+你：检查当前项目结构，不要修改文件。
+机器人：默认 Qoder 对话 a1b2c3d4 已排队：website。
 
-你：现在只分析前端部分，并提出三个修改建议。
+你：继续分析前端入口。
 机器人：已安排继续任务 a1b2c3d4。
 ```
 
-这两条普通文本使用同一个 Codex session。默认对话由 `[service]` 的 `default_chat_project` 决定。若你后来切换到其他任务，发送 `/chat` 即可回到这个长期 Codex 对话。
-
-### 任务进行时的飞书进度
-
-任务启动后，机器人会在单聊中发送简短进度，例如“Codex 正在分析任务”“正在执行本地命令”“已完成一项文件修改”，以及 Codex 已面向用户输出的中间说明。更新最多约每 2 秒一条、每条最多 800 个字符，避免刷屏和触发飞书频率限制。
-
-不会转发 Codex 的原始内部推理、命令原始输出或工具返回内容；完整 JSONL 仍只保存在本机。需要查看原始执行记录时使用 `/logs <任务 ID> [行数]`。
-
-### 在终端打开飞书创建的同一 Codex 会话
-
-桥接器保存每个任务的 Codex thread ID。任务完成、失败或停止后，可以在 WSL 终端运行：
-
-```bash
-cd /home/moss_ubuntu/workspace/AgentMessage
-uv run agent-message resume <任务-ID>
-```
-
-例如：
-
-```bash
-uv run agent-message resume 881e17193a
-```
-
-该命令会执行 `codex resume --include-non-interactive`，以该任务的项目目录、`workspace-write` 沙箱和当前 `codex_tool_network` 设置打开 Codex TUI。因此终端和飞书会继续同一个 Codex thread；在终端退出后，再在飞书发送普通文本也会继续同一个 thread。
-
-同一时间只能从一个入口继续会话：任务状态为 `running` 时，本地 `resume` 命令会拒绝启动。终端 TUI 打开期间不要再从飞书发送普通文本；先退出 TUI，再继续飞书对话，避免两个 Codex 进程同时写入同一会话。
-
-### 创建和管理独立任务
+创建独立任务并继续对话：
 
 ```text
-你：/new website 修复首页登录按钮在手机端溢出的问题
+你：/new website 修复手机端登录按钮溢出
 机器人：任务 a1b2c3d4 已排队：website / codex。
 
-你：先检查现有 CSS，不要修改文件，告诉我原因。
+你：先检查 CSS，不要修改，告诉我原因。
 机器人：已安排继续任务 a1b2c3d4。
 ```
 
-`/new` 会创建并自动选中独立任务；所以上例最后的普通文本会继续 `a1b2c3d4`，而不是默认聊天。可显式选择 Qoder（仅在该项目已允许并安装登录后可用）：
+常用命令：
 
 ```text
-/new website --agent qoder 检查测试失败原因，不要修改文件
+/new website <任务描述>
+/new website --agent qoder <任务描述>
+/chat
+/use a1b2c3d4
+/status
+/status a1b2c3d4
+/logs a1b2c3d4 50
+/logs a1b2c3d4 50 gpu
+/logs a1b2c3d4 50 container
+/stop a1b2c3d4
+/help
 ```
 
-其余命令和含义：
+不确定当前任务时先发送 `/status`。运行中的新消息会排队，不会打断当前执行。
 
-```text
-/chat                     # 回到默认长期 Codex 对话
-/use a1b2c3d4             # 把当前任务切换到指定任务；之后普通文本继续它
-/status                   # 查看当前任务
-/status a1b2c3d4          # 查看指定任务
-/logs a1b2c3d4 50         # 查看该任务最近 50 行本地 JSONL 日志
-/stop a1b2c3d4            # 停止该任务；之后仍可选中它并发送普通文本恢复
-/help                     # 在飞书中显示相同的简明说明
-```
-
-不确定任务 ID 或当前任务时，先发送 `/status`。**任务描述不是任务 ID**；例如“修复首页按钮”只能作为 `/new` 的描述，不能用于 `/use`、`/stop` 或 `/logs`。未知项目别名会返回允许的别名；无效任务 ID 会提示先用 `/status`。
-
-如果任务仍在运行，新消息会按顺序排队，不会中断当前执行。不同项目可以并行，同一个项目严格串行。服务意外重启时，运行中的任务标记为 `interrupted`，不会自动重跑；其 session ID 和默认聊天映射仍会保留。
-
-## 安全边界
-
-- 不要把 App Secret、Codex/Qoder token 或项目私钥写进仓库、`projects.toml`、任务 prompt 或飞书消息。
-- 该工具禁止危险 CLI 启动参数；Codex 固定以 `workspace-write` 运行，工具网络是否开启由 `codex_tool_network` 决定。
-- Qoder 禁用 Web/MCP/子代理与常见危险命令；其 Bash 命令进入独立无网络 user/network namespace。仍应只登记你信任、允许 agent 修改的工作目录。
-- 桥接服务不接管已有交互式 TUI/tmux 会话；它只管理自己创建的 headless CLI 子进程。
-
-## 本地检查
+在终端恢复同一个 Codex 或 Qoder session：
 
 ```bash
-uv run python -m unittest discover -s tests -t . -v
+uv run agent-message resume a1b2c3d4
+```
+
+任务正在由机器人运行时不能同时从终端恢复；退出终端 Agent 后再从飞书继续。
+
+## Bubblewrap GPU
+
+项目设置 `gpu_enabled = true` 后，Codex 或 Qoder 会通过唯一获准的 `gpu_run` MCP 工具运行 CUDA/JAX 命令。普通 Agent shell 按设计看不到 GPU，不能用其中的 CPU 结果判断宿主 GPU 不可用。
+
+安装并验收：
+
+```bash
+sudo apt install bubblewrap
+ls -l /dev/dxg
+/usr/lib/wsl/lib/nvidia-smi
+uv run agent-message doctor --gpu your_proj_name
+```
+
+成功运行时，飞书会收到“GPU 作业已开始”，并且以下命令能看到状态和输出：
+
+```text
+/status a1b2c3d4
+/logs a1b2c3d4 50 gpu
+```
+
+若没有 GPU job，而 Agent 只报告 CPU 或缺少 `/dev/dxg`，发送：
+
+```text
+请通过 agent_message_bwrap_gpu 的 gpu_run 重新执行，不要使用普通 shell 检测 GPU。
+```
+
+GPU 沙箱只挂载当前项目和必要系统文件；项目可写、`.git` 只读。GPU 命令默认可以联网；设置 `gpu_network = false` 可关闭网络。沙箱不挂载宿主 HOME、Windows 目录、飞书凭证或 AgentMessage 数据库。
+
+## Docker 项目容器
+
+AgentMessage 和所选 Codex/Qoder CLI 仍运行在 WSL；目标容器只执行项目命令，因此不需要安装 AgentMessage、Agent CLI 或复制凭证。要求容器已经存在，并将配置中的宿主 `path` 以读写 bind mount 挂入容器。
+
+```toml
+[projects.container_project]
+path = "/home/alice/workspace/container_project"
+default_agent = "qoder"
+allowed_agents = ["codex", "qoder"]
+container_name = "container_project_dev"
+container_path = "/workspace/container_project"
+container_auto_start = true
+container_timeout_seconds = 86400
+```
+
+`container_name` 与项目别名可以不同。`container_path` 显式指定项目在容器内的路径；若为兼容旧配置而省略，则从 `docker inspect` 自动推导。该路径必须对应宿主 `path` 的可写 bind mount。`container_auto_start = true` 只会启动 stopped/exited 容器，任务结束后不会停止它。先运行真实检查；参数可使用项目别名或容器名：
+
+```bash
+uv run agent-message doctor --container container_project
+```
+
+容器项目支持 Codex 和 Qoder，但不能同时设置 `gpu_enabled = true`。Qoder 在容器项目中不获得宿主 Bash，只能通过唯一获准的 `container_run` MCP 执行项目命令。GPU 和网络能力继承容器本身的 Docker 配置；`codex_tool_network` 不会关闭容器网络。容器必须提供 `sh`、支持 `--wait` 的 util-linux `setsid` 和 `kill`。Docker socket 等价于高权限本机控制接口，只应向受信任的 AgentMessage 服务用户开放。
+
+## 安全与检查
+
+- App Secret、token 和项目私钥不要写入仓库、日志或飞书消息。
+- 飞书只能使用项目白名单；Codex 固定为 `workspace-write`，Qoder 使用 `auto` 权限、显式工具白名单和严格 MCP。Qoder 普通 Bash 允许联网。
+- 只授权自己的 `open_id`，只登记允许 Agent 修改的项目。
+- 完整 Agent JSONL、GPU 和容器命令日志保存在 `var/logs/`；Qoder thinking/hook/工具原始输出不会转发到飞书。
+
+```bash
 uv run agent-message doctor
+uv run agent-message doctor --gpu your_proj_name
+uv run agent-message doctor --container container_project
 uv run agent-message tasks
-uv run agent-message pending-senders
+uv run python -m unittest discover -s tests -t . -v
 ```

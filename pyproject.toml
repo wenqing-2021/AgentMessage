@@ -15,7 +15,8 @@ dependencies = [
 
 [project.scripts]
 agent-message = "agent_message.cli:main"
-agent-message-qoder-shell = "agent_message.qoder_shell_prefix:main"
+agent-message-gpu-mcp = "agent_message.runtimes.gpu.mcp:main"
+agent-message-container-mcp = "agent_message.runtimes.container.mcp:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_message"]

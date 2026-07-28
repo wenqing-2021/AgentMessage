@@ -1,3 +1,5 @@
+"""Compose the Feishu gateway, router, scheduler, and durable outbox."""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,12 +7,12 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from .commands import SimpleCommand, parse_command
-from .config import AppConfig
-from .feishu import FeishuGateway
-from .models import InboundMessage
 from .router import MessageRouter
 from .scheduler import Scheduler
-from .state import StateStore
+from ..channels.feishu import FeishuGateway
+from ..core.config import AppConfig
+from ..core.models import InboundMessage
+from ..core.state import StateStore
 
 LOGGER = logging.getLogger(__name__)
 SendText = Callable[[str, str], None]

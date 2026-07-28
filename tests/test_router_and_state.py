@@ -5,9 +5,9 @@ import unittest
 import sqlite3
 from pathlib import Path
 
-from agent_message.models import AgentKind, TaskOrigin, TaskStatus
-from agent_message.router import MessageRouter
-from agent_message.state import StateStore
+from agent_message.core.models import AgentKind, TaskOrigin, TaskStatus
+from agent_message.core.state import StateStore
+from agent_message.orchestration.router import MessageRouter
 
 from tests.helpers import inbound, make_config
 
@@ -81,6 +81,28 @@ class RouterAndStateTests(unittest.TestCase):
         assert second is not None
         self.assertEqual(second.task_id, task.id)
         self.assertEqual(second.session_id, "default-thread")
+
+    def test_qoder_only_project_creates_and_selects_default_qoder_chat(self) -> None:
+        self.state.close()
+        self.config = make_config(
+            Path(self.temp.name),
+            qoder_only_projects=("alpha",),
+        )
+        self.state = StateStore(self.config)
+        self.state.authorize("ou-1")
+        self.router = MessageRouter(self.config, self.state)
+
+        reply = self.router.handle(inbound("hello qoder", "q1", "qm1"))
+        self.assertIn("默认 Qoder 对话", reply[0])
+        task = self.state.selected_task("chat-1", "ou-1")
+        assert task is not None
+        self.assertEqual(task.agent, AgentKind.QODER)
+        self.assertEqual(task.origin, TaskOrigin.CHAT)
+
+        self.router.handle(inbound("/new alpha separate", "q2", "qm2"))
+        reply = self.router.handle(inbound("/chat", "q3", "qm3"))
+        self.assertIn(task.id, reply[0])
+        self.assertIn("Qoder", reply[0])
 
     def test_chat_returns_to_default_chat_after_new_task(self) -> None:
         self.router.handle(inbound("start the long-lived chat", "e1", "m1"))
@@ -172,7 +194,9 @@ class RouterAndStateTests(unittest.TestCase):
         self.state.close()
         self.state = StateStore(self.config)
         self.router = MessageRouter(self.config, self.state)
-        restored = self.state.select_default_chat("chat-1", "ou-1", "alpha")
+        restored = self.state.select_default_chat(
+            "chat-1", "ou-1", "alpha", AgentKind.CODEX
+        )
         assert restored is not None
         self.assertEqual(restored.id, task.id)
 
@@ -223,5 +247,13 @@ class RouterAndStateTests(unittest.TestCase):
                     for row in state._connection.execute("PRAGMA table_info(chat_context)").fetchall()
                 }
                 self.assertIn("default_chat_task_id", columns)
+                gpu_table = state._connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gpu_jobs'"
+                ).fetchone()
+                self.assertIsNotNone(gpu_table)
+                container_table = state._connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'container_jobs'"
+                ).fetchone()
+                self.assertIsNotNone(container_table)
             finally:
                 state.close()

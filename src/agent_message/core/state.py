@@ -1,6 +1,9 @@
+"""SQLite-backed persistence for tasks, runs, messages, and jobs."""
+
 from __future__ import annotations
 
 import hashlib
+import shlex
 import sqlite3
 import threading
 import uuid
@@ -12,6 +15,8 @@ from .config import AppConfig
 from .models import (
     AgentKind,
     ClaimedRun,
+    ContainerJob,
+    GpuJob,
     MessageStatus,
     OutboxMessage,
     Task,
@@ -96,6 +101,43 @@ class StateStore:
                     error TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_runs_task_status ON runs(task_id, status);
+
+                CREATE TABLE IF NOT EXISTS gpu_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    pid INTEGER,
+                    command_summary TEXT NOT NULL,
+                    argv_json TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    log_path TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_gpu_jobs_task_status
+                    ON gpu_jobs(task_id, status, id);
+
+                CREATE TABLE IF NOT EXISTS container_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+                    status TEXT NOT NULL,
+                    pid INTEGER,
+                    container_pid INTEGER,
+                    container_name TEXT NOT NULL,
+                    command_summary TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    log_path TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    exit_code INTEGER,
+                    error TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_container_jobs_task_status
+                    ON container_jobs(task_id, status, id);
 
                 CREATE TABLE IF NOT EXISTS inbound_events (
                     event_id TEXT PRIMARY KEY,
@@ -256,7 +298,11 @@ class StateStore:
             self._set_selected_locked(chat_id, None)
 
     def select_default_chat(
-        self, chat_id: str, owner_open_id: str, project_alias: str
+        self,
+        chat_id: str,
+        owner_open_id: str,
+        project_alias: str,
+        agent: AgentKind,
     ) -> Task | None:
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -270,7 +316,7 @@ class StateStore:
                     chat_id,
                     owner_open_id,
                     project_alias,
-                    AgentKind.CODEX.value,
+                    agent.value,
                     TaskOrigin.CHAT.value,
                 ),
             ).fetchone()
@@ -442,6 +488,264 @@ class StateStore:
                 (session_id, _now(), task_id),
             )
 
+    @staticmethod
+    def _row_to_container_job(row: sqlite3.Row) -> ContainerJob:
+        return ContainerJob(
+            id=int(row["id"]),
+            task_id=str(row["task_id"]),
+            run_id=int(row["run_id"]) if row["run_id"] is not None else None,
+            status=str(row["status"]),
+            pid=int(row["pid"]) if row["pid"] is not None else None,
+            container_pid=(
+                int(row["container_pid"]) if row["container_pid"] is not None else None
+            ),
+            container_name=str(row["container_name"]),
+            command_summary=str(row["command_summary"]),
+            cwd=str(row["cwd"]),
+            log_path=Path(str(row["log_path"])),
+            started_at=str(row["started_at"]),
+            finished_at=(
+                str(row["finished_at"]) if row["finished_at"] is not None else None
+            ),
+            exit_code=int(row["exit_code"]) if row["exit_code"] is not None else None,
+            error=str(row["error"]) if row["error"] is not None else None,
+        )
+
+    def create_container_job(
+        self,
+        *,
+        task_id: str,
+        run_id: int | None,
+        container_name: str,
+        argv: list[str],
+        cwd: str,
+    ) -> ContainerJob:
+        timestamp = _now()
+        summary = shlex.join(argv)[:1000]
+        with self._lock, self._connection:
+            task = self._connection.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise ValueError(f"unknown task: {task_id}")
+            if run_id is not None:
+                linked = self._connection.execute(
+                    "SELECT 1 FROM runs WHERE id = ? AND task_id = ?", (run_id, task_id)
+                ).fetchone()
+                if linked is None:
+                    raise ValueError(f"run {run_id} does not belong to task {task_id}")
+            cursor = self._connection.execute(
+                """
+                INSERT INTO container_jobs(
+                    task_id, run_id, status, container_name, command_summary,
+                    cwd, log_path, started_at
+                ) VALUES (?, ?, 'running', ?, ?, ?, '', ?)
+                """,
+                (task_id, run_id, container_name, summary, cwd, timestamp),
+            )
+            job_id = int(cursor.lastrowid)
+            log_path = self.config.service.log_dir / task_id / f"container-job-{job_id}.log"
+            self._connection.execute(
+                "UPDATE container_jobs SET log_path = ? WHERE id = ?",
+                (str(log_path), job_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM container_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row is not None
+        return self._row_to_container_job(row)
+
+    def set_container_job_pid(self, job_id: int, pid: int) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE container_jobs SET pid = ? WHERE id = ? AND status = 'running'",
+                (pid, job_id),
+            )
+
+    def set_container_job_inner_pid(self, job_id: int, container_pid: int) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE container_jobs SET container_pid = ?
+                WHERE id = ? AND status IN ('running', 'stopping')
+                """,
+                (container_pid, job_id),
+            )
+
+    def finish_container_job(
+        self, job_id: int, *, exit_code: int, error: str | None, cancelled: bool = False
+    ) -> ContainerJob:
+        timestamp = _now()
+        with self._lock, self._connection:
+            previous = self._connection.execute(
+                "SELECT status FROM container_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if previous is None:
+                raise ValueError(f"unknown container job: {job_id}")
+            was_stopping = str(previous["status"]) == "stopping"
+            if cancelled or was_stopping:
+                status = "stopped"
+            elif exit_code == 0 and error is None:
+                status = "succeeded"
+            else:
+                status = "failed"
+            self._connection.execute(
+                """
+                UPDATE container_jobs SET status = ?, finished_at = ?, exit_code = ?, error = ?
+                WHERE id = ?
+                """,
+                (status, timestamp, exit_code, error[:1000] if error else None, job_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM container_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row is not None
+        return self._row_to_container_job(row)
+
+    def latest_container_job(self, task_id: str) -> ContainerJob | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM container_jobs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return self._row_to_container_job(row) if row else None
+
+    def mark_container_jobs_stopping(self, task_id: str) -> list[ContainerJob]:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE container_jobs SET status = 'stopping'
+                WHERE task_id = ? AND status = 'running'
+                """,
+                (task_id,),
+            )
+            rows = self._connection.execute(
+                """
+                SELECT * FROM container_jobs
+                WHERE task_id = ? AND status = 'stopping'
+                """,
+                (task_id,),
+            ).fetchall()
+        return [self._row_to_container_job(row) for row in rows]
+
+    @staticmethod
+    def _row_to_gpu_job(row: sqlite3.Row) -> GpuJob:
+        return GpuJob(
+            id=int(row["id"]),
+            task_id=str(row["task_id"]),
+            run_id=int(row["run_id"]) if row["run_id"] is not None else None,
+            status=str(row["status"]),
+            pid=int(row["pid"]) if row["pid"] is not None else None,
+            command_summary=str(row["command_summary"]),
+            cwd=str(row["cwd"]),
+            log_path=Path(str(row["log_path"])),
+            started_at=str(row["started_at"]),
+            finished_at=str(row["finished_at"]) if row["finished_at"] is not None else None,
+            exit_code=int(row["exit_code"]) if row["exit_code"] is not None else None,
+            error=str(row["error"]) if row["error"] is not None else None,
+        )
+
+    def create_gpu_job(
+        self,
+        *,
+        task_id: str,
+        run_id: int | None,
+        argv: list[str],
+        cwd: str,
+    ) -> GpuJob:
+        timestamp = _now()
+        summary = shlex.join(argv)[:1000]
+        # Keep the legacy column non-sensitive: the requested audit record is the
+        # bounded command summary, not an unlimited copy of every command argument.
+        argv_json = "[]"
+        with self._lock, self._connection:
+            task = self._connection.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if task is None:
+                raise ValueError(f"unknown task: {task_id}")
+            if run_id is not None:
+                linked = self._connection.execute(
+                    "SELECT 1 FROM runs WHERE id = ? AND task_id = ?", (run_id, task_id)
+                ).fetchone()
+                if linked is None:
+                    raise ValueError(f"run {run_id} does not belong to task {task_id}")
+            cursor = self._connection.execute(
+                """
+                INSERT INTO gpu_jobs(
+                    task_id, run_id, status, command_summary, argv_json, cwd, log_path, started_at
+                ) VALUES (?, ?, 'running', ?, ?, ?, '', ?)
+                """,
+                (task_id, run_id, summary, argv_json, cwd, timestamp),
+            )
+            job_id = int(cursor.lastrowid)
+            log_path = self.config.service.log_dir / task_id / f"gpu-job-{job_id}.log"
+            self._connection.execute(
+                "UPDATE gpu_jobs SET log_path = ? WHERE id = ?", (str(log_path), job_id)
+            )
+            row = self._connection.execute(
+                "SELECT * FROM gpu_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row is not None
+        return self._row_to_gpu_job(row)
+
+    def set_gpu_job_pid(self, job_id: int, pid: int) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE gpu_jobs SET pid = ? WHERE id = ? AND status = 'running'",
+                (pid, job_id),
+            )
+
+    def finish_gpu_job(
+        self, job_id: int, *, exit_code: int, error: str | None, cancelled: bool = False
+    ) -> GpuJob:
+        timestamp = _now()
+        with self._lock, self._connection:
+            previous = self._connection.execute(
+                "SELECT status FROM gpu_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if previous is None:
+                raise ValueError(f"unknown gpu job: {job_id}")
+            was_stopping = str(previous["status"]) == "stopping"
+            if cancelled or was_stopping:
+                status = "stopped"
+            elif exit_code == 0 and error is None:
+                status = "succeeded"
+            else:
+                status = "failed"
+            self._connection.execute(
+                """
+                UPDATE gpu_jobs SET status = ?, finished_at = ?, exit_code = ?, error = ?
+                WHERE id = ?
+                """,
+                (status, timestamp, exit_code, error[:1000] if error else None, job_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM gpu_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        assert row is not None
+        return self._row_to_gpu_job(row)
+
+    def latest_gpu_job(self, task_id: str) -> GpuJob | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM gpu_jobs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        return self._row_to_gpu_job(row) if row else None
+
+    def mark_gpu_jobs_stopping(self, task_id: str) -> list[int]:
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT pid FROM gpu_jobs WHERE task_id = ? AND status = 'running' AND pid IS NOT NULL",
+                (task_id,),
+            ).fetchall()
+            self._connection.execute(
+                "UPDATE gpu_jobs SET status = 'stopping' WHERE task_id = ? AND status = 'running'",
+                (task_id,),
+            )
+        return [int(row["pid"]) for row in rows]
+
     def running_pid(self, task_id: str) -> int | None:
         with self._lock:
             row = self._connection.execute(
@@ -496,6 +800,22 @@ class StateStore:
     def recover_interrupted(self) -> list[Task]:
         timestamp = _now()
         with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE gpu_jobs SET status = 'interrupted', finished_at = ?,
+                    error = COALESCE(error, 'bridge restarted')
+                WHERE status IN ('running', 'stopping')
+                """,
+                (timestamp,),
+            )
+            self._connection.execute(
+                """
+                UPDATE container_jobs SET status = 'interrupted', finished_at = ?,
+                    error = COALESCE(error, 'bridge restarted')
+                WHERE status IN ('running', 'stopping')
+                """,
+                (timestamp,),
+            )
             rows = self._connection.execute(
                 "SELECT * FROM tasks WHERE status = ?", (TaskStatus.RUNNING.value,)
             ).fetchall()
@@ -563,7 +883,31 @@ class StateStore:
         log_path = Path(row["log_path"])
         if not log_path.is_file():
             return []
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return self._tail_file(log_path, limit)
+
+    def tail_gpu_log(self, task_id: str, limit: int) -> list[str]:
+        job = self.latest_gpu_job(task_id)
+        if job is None or not job.log_path.is_file():
+            return []
+        return self._tail_file(job.log_path, limit)
+
+    def tail_container_log(self, task_id: str, limit: int) -> list[str]:
+        job = self.latest_container_job(task_id)
+        if job is None or not job.log_path.is_file():
+            return []
+        return self._tail_file(job.log_path, limit)
+
+    @staticmethod
+    def _tail_file(path: Path, limit: int, max_bytes: int = 256 * 1024) -> list[str]:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        if size > max_bytes and lines:
+            lines = lines[1:]
         return lines[-limit:]
 
     def task_count_by_status(self) -> Iterable[tuple[str, int]]:

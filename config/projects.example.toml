@@ -12,6 +12,23 @@ stop_grace_seconds = 10
 final_message_limit = 3500
 
 [projects.agent_message]
-path = "/home/moss_ubuntu/workspace/AgentMessage"
+path = "/home/alice/workspace/agent_message"
 default_agent = "codex"
 allowed_agents = ["codex", "qoder"]
+# Set default_agent = "qoder" for a long-lived default Qoder chat. A project may
+# also use allowed_agents = ["qoder"] when Codex is not installed.
+# Optional WSL GPU execution through AgentMessage's bubblewrap MCP:
+# gpu_enabled = true
+# gpu_network = true
+# gpu_timeout_seconds = 86400
+
+# Existing Docker container execution. The host path must already be bind-mounted at
+# container_path in the named container; docker inspect verifies this mapping before each run.
+[projects.container_project]
+path = "/home/alice/workspace/container_project"
+default_agent = "codex"
+allowed_agents = ["codex", "qoder"]
+container_name = "container_project_dev"
+container_path = "/workspace/container_project"
+container_auto_start = true
+container_timeout_seconds = 86400
