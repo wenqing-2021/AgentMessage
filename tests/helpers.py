@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from agent_message.config import AppConfig, load_config
+from agent_message.models import InboundMessage
+
+
+def make_config(root: Path, projects: tuple[str, ...] = ("alpha",)) -> AppConfig:
+    entries: list[str] = [
+        "[service]",
+        f'state_dir = "{root / "state"}"',
+        f'log_dir = "{root / "logs"}"',
+        f'default_chat_project = "{projects[0]}"',
+        "codex_tool_network = false",
+        "stop_grace_seconds = 1",
+        "final_message_limit = 3500",
+        "",
+    ]
+    for name in projects:
+        project_path = root / "projects" / name
+        project_path.mkdir(parents=True, exist_ok=True)
+        entries.extend(
+            [
+                f"[projects.{name}]",
+                f'path = "{project_path}"',
+                'default_agent = "codex"',
+                'allowed_agents = ["codex", "qoder"]',
+                "",
+            ]
+        )
+    config_path = root / "projects.toml"
+    config_path.write_text("\n".join(entries), encoding="utf-8")
+    return load_config(config_path)
+
+
+def inbound(text: str, event_id: str = "event-1", message_id: str = "msg-1") -> InboundMessage:
+    return InboundMessage(event_id, message_id, "chat-1", "p2p", "ou-1", text)

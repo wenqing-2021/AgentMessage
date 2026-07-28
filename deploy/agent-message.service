@@ -1,0 +1,22 @@
+[Unit]
+Description=Feishu bridge for Codex and Qoder CLI tasks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/AgentMessage
+EnvironmentFile=%h/.config/agent-message/feishu.env
+# If `dirname "$(command -v codex)"` differs, replace only `%h/.local/bin` below.
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=%h/workspace/AgentMessage/.venv/bin/agent-message run --config %h/workspace/AgentMessage/config/projects.toml
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

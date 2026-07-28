@@ -1,0 +1,17 @@
+# Copy to config/projects.toml and replace every example path.
+# Secrets do not belong here. Set AGENT_MESSAGE_FEISHU_APP_ID and
+# AGENT_MESSAGE_FEISHU_APP_SECRET in a chmod-600 environment file instead.
+
+[service]
+state_dir = "var"
+log_dir = "var/logs"
+default_chat_project = "agent_message"
+# Set true only for trusted projects where Codex-generated tools may use the network.
+codex_tool_network = false
+stop_grace_seconds = 10
+final_message_limit = 3500
+
+[projects.agent_message]
+path = "/home/moss_ubuntu/workspace/AgentMessage"
+default_agent = "codex"
+allowed_agents = ["codex", "qoder"]

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-message"
+version = "0.1.0"
+description = "A secure Feishu bridge for headless Codex and Qoder CLI tasks."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "lark-oapi>=1.4.20",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.scripts]
+agent-message = "agent_message.cli:main"
+agent-message-qoder-shell = "agent_message.qoder_shell_prefix:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_message"]
+
+[tool.hatch.envs.default]
+dependencies = []
