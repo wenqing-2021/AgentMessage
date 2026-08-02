@@ -56,6 +56,8 @@ src/agent_message/
 └── cli.py                   # 本地统一命令行入口
 ```
 
+仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；GPU/Bubblewrap 等较长的用户文档放在 `assets/docs/`。
+
 保持以下依赖方向：
 
 ```text
@@ -114,6 +116,8 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - 项目只能来自 `config/projects.toml` 的绝对路径白名单；飞书消息不能提交路径。
 - App ID、App Secret 和初始 open_id 白名单只从环境变量读取。
 - Agent 子进程环境必须移除 `AGENT_MESSAGE_FEISHU_*` 和 `AGENT_MESSAGE_ALLOWED_OPEN_IDS`，不得让 Codex/Qoder 或其普通 Bash 继承飞书凭证。
+- `install.sh` 的凭证输入必须通过 `/dev/tty`，App Secret 不回显；断点文件、环境文件、项目配置和生成的 unit 保持 `0600`。
+- `uninstall.sh` 必须先校验精确安装路径、停止服务并完成可选备份，再删除仓库和凭证目录；不得删除 systemd、uv、Agent CLI、Docker 或 Bubblewrap。
 - 不要把真实凭证、open_id、用户目录、私有项目名或真实容器名写入 tracked 文件。
 - `config/projects.toml`、`var/` 和 SQLite/WAL/SHM 文件是本地状态，不得提交。
 - 新增配置项时同时修改 dataclass、`load_config()` 校验、`config/projects.example.toml`、中英文 README 和配置测试。
