@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/img/ChatGPT%20Image%202026%E5%B9%B48%E6%9C%882%E6%97%A5%2013_11_44.png" width="100%" alt="AgentMessage connects a Feishu bot to Codex or Qoder in WSL, with optional Docker and GPU runtimes">
+  <img src="assets/img/logo.png" width="100%" alt="AgentMessage connects a Feishu bot to Codex or Qoder in WSL, with optional Docker and GPU runtimes">
 </p>
-
-<h1 align="center">AgentMessage</h1>
 
 <p align="center">
   <a href="README.md"><img src="https://img.shields.io/badge/README-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-555555" alt="简体中文"></a>
