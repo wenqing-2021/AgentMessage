@@ -4,7 +4,9 @@ import tempfile
 import unittest
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
+from agent_message.agents.model_catalog import CodexModel
 from agent_message.core.models import AgentKind, TaskOrigin, TaskStatus
 from agent_message.core.state import StateStore
 from agent_message.orchestration.router import MessageRouter
@@ -257,3 +259,61 @@ class RouterAndStateTests(unittest.TestCase):
                 self.assertIsNotNone(container_table)
             finally:
                 state.close()
+
+
+class ModelCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.config = make_config(Path(self.temp.name), ("alpha",))
+        self.state = StateStore(self.config)
+        self.state.authorize("ou-1")
+        self.router = MessageRouter(self.config, self.state)
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self.temp.cleanup()
+
+    def test_model_lists_available_models(self) -> None:
+        models = [
+            CodexModel("gpt-5.6-sol", "GPT-5.6-Sol"),
+            CodexModel("deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro"),
+        ]
+        with patch(
+            "agent_message.orchestration.router.list_codex_models", return_value=models
+        ), patch(
+            "agent_message.orchestration.router.configured_codex_model",
+            return_value="deepseek/deepseek-v4-pro",
+        ):
+            reply = self.router.handle(inbound("/model"))
+        self.assertIn("deepseek/deepseek-v4-pro", reply[0])
+        self.assertIn("（当前）", reply[0])
+
+    def test_model_switches_and_persists(self) -> None:
+        with patch(
+            "agent_message.orchestration.router.list_codex_models",
+            return_value=[CodexModel("gpt-5.6-sol", "GPT-5.6-Sol")],
+        ):
+            reply = self.router.handle(inbound("/model gpt-5.6-sol"))
+        self.assertIn("已切换 Codex 模型", reply[0])
+        self.assertEqual(self.state.get_setting("codex_model"), "gpt-5.6-sol")
+
+    def test_model_rejects_unknown_name(self) -> None:
+        with patch(
+            "agent_message.orchestration.router.list_codex_models",
+            return_value=[CodexModel("gpt-5.6-sol", "GPT-5.6-Sol")],
+        ):
+            reply = self.router.handle(inbound("/model not-a-real-model"))
+        self.assertIn("未知模型", reply[0])
+        self.assertIsNone(self.state.get_setting("codex_model"))
+
+    def test_model_unavailable_catalog(self) -> None:
+        with patch("agent_message.orchestration.router.list_codex_models", return_value=[]):
+            reply = self.router.handle(inbound("/model"))
+        self.assertIn("无法读取 Codex 模型目录", reply[0])
+
+    def test_claimed_run_includes_selected_model(self) -> None:
+        self.state.set_setting("codex_model", "deepseek/deepseek-v4-pro")
+        self.router.handle(inbound("hello", "e1", "m1"))
+        run = self.state.claimed_run()
+        assert run is not None
+        self.assertEqual(run.model, "deepseek/deepseek-v4-pro")

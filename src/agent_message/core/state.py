@@ -160,6 +160,12 @@ class StateStore:
                     added_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id TEXT NOT NULL,
@@ -213,6 +219,28 @@ class StateStore:
             return self._connection.execute(
                 "SELECT 1 FROM authorized_users WHERE open_id = ?", (open_id,)
             ).fetchone() is not None
+
+    def get_setting(self, key: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+            return str(row["value"]) if row is not None else None
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        timestamp = _now()
+        with self._lock, self._connection:
+            if value is None:
+                self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+                return
+            self._connection.execute(
+                """
+                INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                    updated_at=excluded.updated_at
+                """,
+                (key, value, timestamp),
+            )
 
     def register_inbound(
         self, event_id: str, message_id: str, chat_id: str, sender_open_id: str, text: str
@@ -464,6 +492,10 @@ class StateStore:
             run_id = int(run_cursor.lastrowid)
             log_path = self.config.service.log_dir / row["task_id"] / f"run-{run_id}.jsonl"
             self._connection.execute("UPDATE runs SET log_path = ? WHERE id = ?", (str(log_path), run_id))
+            model_row = self._connection.execute(
+                "SELECT value FROM settings WHERE key = 'codex_model'"
+            ).fetchone()
+            model = str(model_row["value"]) if model_row is not None else None
             return ClaimedRun(
                 run_id=run_id,
                 task_id=row["task_id"],
@@ -475,6 +507,7 @@ class StateStore:
                 prompt=row["content"],
                 chat_id=row["chat_id"],
                 log_path=log_path,
+                model=model,
             )
 
     def set_run_pid(self, run_id: int, pid: int) -> None:

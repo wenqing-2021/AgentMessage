@@ -123,6 +123,21 @@ class AdapterTests(unittest.TestCase):
             self.assertNotIn("--ask-for-approval", command)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", resumed)
 
+    def test_codex_injects_model_flag_when_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            selected = ClaimedRun(**{**make_run(root).__dict__, "model": "deepseek/deepseek-v4-pro"})
+            command = CodexAdapter().build_command(selected, root / "final")
+            self.assertIn("-m", command)
+            self.assertEqual(command[command.index("-m") + 1], "deepseek/deepseek-v4-pro")
+            resumed = CodexAdapter().build_command(
+                ClaimedRun(**{**make_run(root, "thread-1").__dict__, "model": "kimi-code/k3"}),
+                root / "final",
+            )
+            self.assertEqual(resumed[resumed.index("-m") + 1], "kimi-code/k3")
+            plain = CodexAdapter().build_command(make_run(root), root / "final")
+            self.assertNotIn("-m", plain)
+
     def test_codex_injects_gpu_mcp_for_new_and_resumed_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

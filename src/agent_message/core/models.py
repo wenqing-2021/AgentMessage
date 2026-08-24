@@ -71,6 +71,7 @@ class ClaimedRun:
     prompt: str
     chat_id: str
     log_path: Path
+    model: str | None = None
 
 
 @dataclass(frozen=True)

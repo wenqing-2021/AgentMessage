@@ -22,10 +22,11 @@ class NewTaskCommand:
 
 @dataclass(frozen=True)
 class SimpleCommand:
-    name: Literal["use", "status", "stop", "logs", "chat", "help"]
+    name: Literal["use", "status", "stop", "logs", "chat", "model", "help"]
     task_id: str | None = None
     log_lines: int | None = None
     log_source: Literal["agent", "gpu", "container"] = "agent"
+    model_name: str | None = None
 
 
 ParsedCommand = NewTaskCommand | SimpleCommand | None
@@ -50,6 +51,8 @@ GPU：项目启用 bubblewrap GPU 后，可直接要求 Codex 或 Qoder 运行 C
 → 切换当前任务；之后普通文本会继续 a1b2c3d4。
 /chat
 → 回到默认长期 Agent 对话；之后普通文本会继续它。
+/model
+→ 列出 Codex 可用模型；发送 /model <模型名称> 切换模型。
 /status 或 /status a1b2c3d4
 /logs a1b2c3d4 50
 /logs a1b2c3d4 50 gpu
@@ -78,6 +81,10 @@ def parse_command(text: str) -> ParsedCommand:
         if len(parts) != 1:
             raise CommandError("/chat 不接收参数。")
         return SimpleCommand("chat")
+    if command == "/model":
+        if len(parts) > 2:
+            raise CommandError("用法：/model [模型名称]")
+        return SimpleCommand("model", model_name=parts[1] if len(parts) == 2 else None)
     if command == "/new":
         if len(parts) < 3:
             raise CommandError("用法：/new <项目别名> [--agent codex|qoder] <任务>")

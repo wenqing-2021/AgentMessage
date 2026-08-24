@@ -122,6 +122,8 @@ journalctl --user -u agent-message -f
 /new website <任务描述>
 /new website --agent qoder <任务描述>
 /chat
+/model
+/model <模型名称>
 /use a1b2c3d4
 /status
 /status a1b2c3d4
@@ -131,6 +133,8 @@ journalctl --user -u agent-message -f
 /stop a1b2c3d4
 /help
 ```
+
+发送 /model 查看 Codex 可用模型，发送 /model <模型名称> 切换后续 Codex 任务使用的模型。
 
 在终端恢复飞书创建的同一个 Codex/Qoder session：
 

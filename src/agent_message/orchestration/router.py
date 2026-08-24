@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..agents.model_catalog import configured_codex_model, list_codex_models
 from .commands import HELP_TEXT, CommandError, NewTaskCommand, SimpleCommand, parse_command
 from ..core.config import AppConfig
 from ..core.models import AgentKind, InboundMessage, Task, TaskOrigin, TaskStatus
@@ -11,6 +12,15 @@ from ..core.state import StateStore
 def _agent_label(agent: AgentKind) -> str:
     value = getattr(agent, "value", str(agent))
     return "Codex" if value == "codex" else "Qoder" if value == "qoder" else str(value)
+
+
+def _valid_model_name(name: str) -> bool:
+    return (
+        bool(name)
+        and len(name) <= 200
+        and "\x00" not in name
+        and not any(ch.isspace() for ch in name)
+    )
 
 
 class MessageRouter:
@@ -83,6 +93,8 @@ class MessageRouter:
     def _simple(self, message: InboundMessage, command: SimpleCommand) -> list[str]:
         if command.name == "help":
             return [HELP_TEXT]
+        if command.name == "model":
+            return self._model(command)
         if command.name == "chat":
             project = self.config.projects[self.config.service.default_chat_project]
             task = self.state.select_default_chat(
@@ -146,6 +158,38 @@ class MessageRouter:
             )
             return ["没有可用日志。"] if not lines else ["\n".join(lines)]
         raise AssertionError(f"unhandled command: {command.name}")
+
+    def _model(self, command: SimpleCommand) -> list[str]:
+        if command.model_name is None:
+            models = list_codex_models()
+            current = self.state.get_setting("codex_model") or configured_codex_model()
+            if not models:
+                return [
+                    "无法读取 Codex 模型目录：请确认 opencodex 已配置，"
+                    "且 ~/.codex/config.toml 的 model_catalog_json 指向有效目录。"
+                ]
+            lines = ["可用 Codex 模型："]
+            for model in models:
+                if model.display_name and model.display_name != model.slug:
+                    label = f"{model.slug}（{model.display_name}）"
+                else:
+                    label = model.slug
+                if model.slug == current:
+                    label += "（当前）"
+                lines.append(f"- {label}")
+            lines.append(f"当前模型：{current or '未设置（使用 Codex 配置默认）'}")
+            lines.append("发送 /model <模型名称> 切换，例如 /model deepseek/deepseek-v4-pro。")
+            return ["\n".join(lines)]
+
+        name = command.model_name
+        if not _valid_model_name(name):
+            return ["模型名称不能为空，且不能包含空白或控制字符。发送 /model 查看可用模型。"]
+        models = list_codex_models()
+        if models and all(model.slug != name for model in models):
+            available = "、".join(model.slug for model in models[:10])
+            return [f"未知模型：{name}。发送 /model 查看完整列表（前几个：{available}）。"]
+        self.state.set_setting("codex_model", name)
+        return [f"已切换 Codex 模型为 {name}；后续 Codex 任务将使用该模型。"]
 
     def _format_task(self, task: Task) -> str:
         session = task.session_id or "尚未创建"

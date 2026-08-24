@@ -208,6 +208,7 @@ class CodexAdapter(AgentAdapter):
             run.task_id, run.project_alias, run.run_id
         )
         prompt = prompt_prefix + run.prompt
+        model_args = ["-m", run.model] if run.model else []
         common = [
             self.executable,
             "-c",
@@ -215,6 +216,7 @@ class CodexAdapter(AgentAdapter):
             + ("true" if self.tool_network_enabled else "false"),
             *runtime_config,
             "exec",
+            *model_args,
         ]
         output = ["--json", "--output-last-message", str(last_message_path)]
         if run.session_id:

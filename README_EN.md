@@ -122,6 +122,8 @@ Ordinary text continues the current task. When there is no current task, the def
 /new website <task description>
 /new website --agent qoder <task description>
 /chat
+/model
+/model <model name>
 /use a1b2c3d4
 /status
 /status a1b2c3d4
@@ -131,6 +133,8 @@ Ordinary text continues the current task. When there is no current task, the def
 /stop a1b2c3d4
 /help
 ```
+
+Send /model to list the Codex models; /model <model name> switches the model used by subsequent Codex tasks.
 
 Resume the same Codex/Qoder session from a terminal:
 
