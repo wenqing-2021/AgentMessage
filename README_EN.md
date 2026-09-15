@@ -124,6 +124,7 @@ Ordinary text continues the current task. When there is no current task, the def
 /chat
 /model
 /model <model name>
+/compact
 /use a1b2c3d4
 /status
 /status a1b2c3d4
@@ -134,7 +135,11 @@ Ordinary text continues the current task. When there is no current task, the def
 /help
 ```
 
-Send /model to list the Codex models; /model <model name> switches the model used by subsequent Codex tasks.
+Send /model to list the Codex models; /model <model name> switches the model for the next turn in the current session and future tasks, preserving conversation context. A running turn is unchanged. This is the global Codex default and does not affect Qoder.
+
+Send /compact to compact the context of the current Codex session. AgentMessage calls the native `thread/compact/start` method on the Codex app-server, keeps the same session, and replies in Feishu when compaction finishes. If the task is already running, the request is queued after the current turn. Qoder tasks are not supported yet; /compact only compacts and adds no new conversation content.
+
+The GPU sandbox supports Git writes (such as add, commit, checkout, pull, and push) through `gpu_run`; container projects use `container_run`. Qoder no longer blocks ordinary `git push`, while destructive Git restrictions remain. Remote operations require network access and repository credentials in the runtime.
 
 Resume the same Codex/Qoder session from a terminal:
 

@@ -127,6 +127,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - Agent 命令必须通过 argv 调用；不要使用 `shell=True` 或拼接 shell 字符串。
 - Codex 默认使用 `workspace-write`，且 `sandbox_workspace_write.network_access=false`。
 - Codex resume 必须保留 session ID、项目上下文和当前轮次的 runtime policy 前缀。
+- `/compact` 通过 Codex app-server 的 `thread/compact/start` 执行原生压缩，不经过 `exec` 提示词；压缩请求作为 `task_messages.operation=compact` 持久化排队，并保留原 session ID。
 - Qoder 使用 `auto` 权限、空 `setting-sources`、显式工具列表和严格 MCP 配置；普通 Bash 允许联网，但继续限制 `sudo`、破坏性 Git 操作和发布命令。
 - Qoder 的 `result` 事件是唯一成败依据；不得把 assistant text、thinking、hook 输出或工具参数作为最终结果转发。
 - 不要以普通 Codex shell 的 CPU-only、NVML 或 `/dev/dxg` 结果判断宿主 GPU 是否可用。
@@ -135,7 +136,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 
 - GPU 项目只能通过 `agent_message_bwrap_gpu` 的 `gpu_run` 执行 GPU 命令。
 - GPU 命令默认允许联网；只有显式设置 `gpu_network = false` 时才添加 network namespace 隔离。
-- GPU sandbox 只挂载当前项目和必要系统路径；项目可写，`.git` 只读，敏感 HOME/Windows/其他项目路径不可见。
+- GPU sandbox 只挂载当前项目和必要系统路径；项目及内部 `.git` 可写，Git 写操作通过 `gpu_run` 执行，敏感 HOME/Windows/其他项目路径不可见。
 - Container 项目只能通过 `agent_message_container` 的 `container_run` 执行项目命令。
 - Container runner 必须用 `docker inspect` 验证容器状态和宿主项目目录的可写 bind mount。
 - MCP 参数使用 `argv: list[str]` 和项目相对 `cwd`；必须拒绝逃逸项目根目录的路径。

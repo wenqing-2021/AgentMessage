@@ -53,7 +53,7 @@ uv run agent-message doctor --gpu your_proj_name
 ## 安全边界
 
 - GPU sandbox 只挂载当前项目和必要系统文件。
-- 项目可写，`.git` 只读。
+- 项目及其内部 `.git` 可写，Git 写操作通过 `gpu_run` 执行。不会额外挂载项目外的 worktree Git 元数据或宿主凭证；远程操作仍受网络配置和沙盒内可用凭证限制。
 - 宿主 HOME、Windows 目录、其他项目、飞书凭证和 AgentMessage 数据库不可见。
 - Bubblewrap 使用 `--clearenv`，GPU 命令不会继承飞书服务环境变量。
 - 单次命令受项目配置的超时、取消和日志策略约束。

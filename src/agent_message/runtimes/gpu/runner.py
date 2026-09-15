@@ -170,9 +170,6 @@ def build_bwrap_command(
     _append_dir(command, created, project_root.parent)
     command.extend(["--bind", str(project_root), str(project_root)])
     created.add(project_root)
-    git_path = project_root / ".git"
-    if git_path.exists():
-        command.extend(["--ro-bind", str(git_path), str(git_path)])
 
     resolved_uv = Path(uv_path).resolve() if uv_path else None
     if resolved_uv is None:

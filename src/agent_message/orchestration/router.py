@@ -95,6 +95,20 @@ class MessageRouter:
             return [HELP_TEXT]
         if command.name == "model":
             return self._model(command)
+        if command.name == "compact":
+            task = self.state.selected_task(message.chat_id, message.sender_open_id)
+            if task is None:
+                return ["没有当前任务，请先发送消息创建会话，或用 /use 选择任务。"]
+            if task.agent != AgentKind.CODEX:
+                return ["/compact 目前仅支持 Codex，暂不支持 Qoder。"]
+            if not task.session_id:
+                return ["当前任务尚未创建 session，请等待首轮执行后再发送 /compact。"]
+            updated = self.state.queue_message(
+                task.id, message.sender_open_id, "/compact", operation="compact"
+            )
+            if updated is None:
+                return ["当前任务无法压缩，请用 /status 检查会话状态。"]
+            return [f"任务 {task.id} 的上下文压缩已排队，完成后会通知你；保留当前 session。"]
         if command.name == "chat":
             project = self.config.projects[self.config.service.default_chat_project]
             task = self.state.select_default_chat(
@@ -189,7 +203,7 @@ class MessageRouter:
             available = "、".join(model.slug for model in models[:10])
             return [f"未知模型：{name}。发送 /model 查看完整列表（前几个：{available}）。"]
         self.state.set_setting("codex_model", name)
-        return [f"已切换 Codex 模型为 {name}；后续 Codex 任务将使用该模型。"]
+        return [f"已切换 Codex 模型为 {name}；从下一轮 Codex 执行起生效，包括当前 session；正在运行的轮次不变。"]
 
     def _format_task(self, task: Task) -> str:
         session = task.session_id or "尚未创建"

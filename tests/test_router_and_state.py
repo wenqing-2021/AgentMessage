@@ -9,6 +9,7 @@ from unittest.mock import patch
 from agent_message.agents.model_catalog import CodexModel
 from agent_message.core.models import AgentKind, TaskOrigin, TaskStatus
 from agent_message.core.state import StateStore
+from agent_message.orchestration.commands import CommandError, parse_command
 from agent_message.orchestration.router import MessageRouter
 
 from tests.helpers import inbound, make_config
@@ -249,6 +250,13 @@ class RouterAndStateTests(unittest.TestCase):
                     for row in state._connection.execute("PRAGMA table_info(chat_context)").fetchall()
                 }
                 self.assertIn("default_chat_task_id", columns)
+                message_columns = {
+                    row["name"]
+                    for row in state._connection.execute(
+                        "PRAGMA table_info(task_messages)"
+                    ).fetchall()
+                }
+                self.assertIn("operation", message_columns)
                 gpu_table = state._connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gpu_jobs'"
                 ).fetchone()
@@ -259,6 +267,98 @@ class RouterAndStateTests(unittest.TestCase):
                 self.assertIsNotNone(container_table)
             finally:
                 state.close()
+
+
+class CompactCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.config = make_config(
+            Path(self.temp.name), ("alpha", "beta"), qoder_only_projects=("beta",)
+        )
+        self.state = StateStore(self.config)
+        self.state.authorize("ou-1")
+        self.router = MessageRouter(self.config, self.state)
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self.temp.cleanup()
+
+    def start_session(self, project: str = "alpha") -> str:
+        self.router.handle(inbound(f"/new {project} start work", "e-new", "m-new"))
+        task = self.state.selected_task("chat-1", "ou-1")
+        assert task is not None
+        run = self.state.claimed_run()
+        assert run is not None
+        self.state.finish_run(
+            run_id=run.run_id,
+            task_id=run.task_id,
+            exit_code=0,
+            session_id="thread-compact",
+            final_message="done",
+            error=None,
+        )
+        return task.id
+
+    def test_compact_rejects_arguments(self) -> None:
+        with self.assertRaises(CommandError):
+            parse_command("/compact now")
+
+    def test_compact_requires_current_task(self) -> None:
+        reply = self.router.handle(inbound("/compact", "e1", "m1"))
+
+        self.assertIn("没有当前任务", reply[0])
+
+    def test_compact_requires_existing_session(self) -> None:
+        self.router.handle(inbound("/new alpha start work", "e1", "m1"))
+        reply = self.router.handle(inbound("/compact", "e2", "m2"))
+
+        self.assertIn("尚未创建 session", reply[0])
+
+    def test_compact_rejects_qoder_task(self) -> None:
+        task_id = self.start_session("beta")
+        task = self.state.get_task(task_id)
+        assert task is not None
+        self.assertEqual(task.agent, AgentKind.QODER)
+
+        reply = self.router.handle(inbound("/compact", "e2", "m2"))
+
+        self.assertIn("仅支持 Codex", reply[0])
+        self.assertIsNone(
+            self.state.queue_message(task_id, "ou-1", "/compact", operation="compact")
+        )
+
+    def test_compact_queues_operation_for_selected_session(self) -> None:
+        task_id = self.start_session()
+        reply = self.router.handle(inbound("/compact", "e2", "m2"))
+
+        self.assertIn("上下文压缩已排队", reply[0])
+        run = self.state.claimed_run()
+        assert run is not None
+        self.assertEqual(run.task_id, task_id)
+        self.assertEqual(run.operation, "compact")
+        self.assertEqual(run.session_id, "thread-compact")
+
+    def test_compact_queues_behind_running_turn(self) -> None:
+        task_id = self.start_session()
+        self.router.handle(inbound("keep going", "e2", "m2"))
+        running = self.state.claimed_run()
+        assert running is not None
+        reply = self.router.handle(inbound("/compact", "e3", "m3"))
+
+        self.assertIn("已排队", reply[0])
+        self.assertIsNone(self.state.claimed_run())
+        self.state.finish_run(
+            run_id=running.run_id,
+            task_id=running.task_id,
+            exit_code=0,
+            session_id="thread-compact",
+            final_message="done",
+            error=None,
+        )
+        compaction = self.state.claimed_run()
+        assert compaction is not None
+        self.assertEqual(compaction.task_id, task_id)
+        self.assertEqual(compaction.operation, "compact")
 
 
 class ModelCommandTests(unittest.TestCase):
@@ -317,3 +417,32 @@ class ModelCommandTests(unittest.TestCase):
         run = self.state.claimed_run()
         assert run is not None
         self.assertEqual(run.model, "deepseek/deepseek-v4-pro")
+
+    def test_model_switch_applies_to_queued_turn_in_same_session(self) -> None:
+        self.state.set_setting("codex_model", "old-model")
+        self.router.handle(inbound("hello", "e1", "m1"))
+        first = self.state.claimed_run()
+        assert first is not None
+        self.router.handle(inbound("continue", "e2", "m2"))
+        with patch(
+            "agent_message.orchestration.router.list_codex_models",
+            return_value=[CodexModel("new-model", "New Model")],
+        ):
+            reply = self.router.handle(inbound("/model new-model", "e3", "m3"))
+        self.assertIn("当前 session", reply[0])
+        self.assertEqual(first.model, "old-model")
+        self.assertIsNone(self.state.claimed_run())
+        self.state.finish_run(
+            run_id=first.run_id,
+            task_id=first.task_id,
+            exit_code=0,
+            session_id="existing-thread",
+            final_message="done",
+            error=None,
+        )
+        second = self.state.claimed_run()
+        assert second is not None
+        self.assertEqual(second.task_id, first.task_id)
+        self.assertEqual(second.session_id, "existing-thread")
+        self.assertEqual(second.model, "new-model")
+        self.assertEqual(second.prompt, "continue")

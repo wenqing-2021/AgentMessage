@@ -124,6 +124,7 @@ journalctl --user -u agent-message -f
 /chat
 /model
 /model <模型名称>
+/compact
 /use a1b2c3d4
 /status
 /status a1b2c3d4
@@ -134,7 +135,11 @@ journalctl --user -u agent-message -f
 /help
 ```
 
-发送 /model 查看 Codex 可用模型，发送 /model <模型名称> 切换后续 Codex 任务使用的模型。
+发送 /model 查看 Codex 可用模型，发送 /model <模型名称> 切换模型：当前 session 的下一轮以及后续新任务都会使用新模型，保留会话上下文；正在执行的轮次不变。该设置为全局 Codex 默认模型，不影响 Qoder。
+
+发送 /compact 压缩当前 Codex session 的上下文：AgentMessage 通过 Codex app-server 的 `thread/compact/start` 执行原生压缩，保留同一个 session 与后续对话能力，完成后在飞书回复结果。若该任务正在执行，压缩请求会排在当前轮次之后；Qoder 任务暂不支持。/compact 只压缩，不产生新的对话内容。
+
+GPU 沙盒允许通过 `gpu_run` 执行 Git 写操作（如 add、commit、checkout、pull、push）；容器项目继续通过 `container_run` 执行。Qoder 不再统一拦截普通 `git push`，仍限制破坏性 Git 操作。远程操作需要运行环境具备网络和相应仓库凭证。
 
 在终端恢复飞书创建的同一个 Codex/Qoder session：
 

@@ -7,7 +7,10 @@ GPU_INSTRUCTIONS = (
     "gpu_run argv and a project-relative cwd. Never run such commands with the normal shell: "
     "that shell intentionally has no GPU device nodes. If a normal-shell command reports CPU-only "
     "or missing /dev/dxg, do not conclude that GPU is unavailable; rerun the check through "
-    "gpu_run. Continue to use the normal shell for file edits and CPU-only commands."
+    "gpu_run. Also use gpu_run for Git commands that write repository metadata or need network "
+    "access, including git add, commit, branch, checkout, fetch, pull, and push. The project "
+    "and its .git directory are writable inside this sandbox. Continue to use the normal "
+    "shell for file edits and other CPU-only commands."
 )
 
 # Resumed agent sessions can retain an earlier tool-use habit. Repeating the policy in the

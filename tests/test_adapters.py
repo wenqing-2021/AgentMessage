@@ -135,6 +135,8 @@ class AdapterTests(unittest.TestCase):
                 root / "final",
             )
             self.assertEqual(resumed[resumed.index("-m") + 1], "kimi-code/k3")
+            self.assertGreater(resumed.index("-m"), resumed.index("resume"))
+            self.assertIn("thread-1", resumed)
             plain = CodexAdapter().build_command(make_run(root), root / "final")
             self.assertNotIn("-m", plain)
 
@@ -194,7 +196,7 @@ class AdapterTests(unittest.TestCase):
             self.assertIn("Bash", tools)
             blocked = command[command.index("--disallowed-tools") + 1]
             self.assertIn("WebFetch", blocked)
-            self.assertIn("Bash(git push:*)", blocked)
+            self.assertNotIn("Bash(git push:*)", blocked)
             self.assertNotIn("Bash(curl:*)", blocked)
             self.assertNotIn("Bash(wget:*)", blocked)
             self.assertNotIn("Bash(ssh:*)", blocked)

@@ -53,7 +53,7 @@ Use gpu_run from agent_message_bwrap_gpu to run this command again. Do not detec
 ## Security boundary
 
 - The GPU sandbox mounts only the current project and required system files.
-- The project is writable and `.git` is read-only.
+- The project and its internal `.git` are writable; use `gpu_run` for Git writes. External worktree metadata and host credentials are not mounted. Remote operations still require enabled networking and credentials available inside the sandbox.
 - The host HOME, Windows drives, other projects, Feishu credentials, and the AgentMessage database are not visible.
 - Bubblewrap uses `--clearenv`, so GPU commands do not inherit Feishu service variables.
 - Every command remains subject to the configured timeout, cancellation, and logging policy.

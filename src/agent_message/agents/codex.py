@@ -6,9 +6,16 @@ import json
 import sys
 from pathlib import Path
 
-from .base import AdapterError, AgentAdapter, ParsedAgentEvent
+from .base import (
+    AdapterError,
+    AgentAdapter,
+    ParsedAgentEvent,
+    PidCallback,
+    ProgressCallback,
+    SessionCallback,
+)
 from ..core.config import AppConfig
-from ..core.models import AgentKind, ClaimedRun, Task
+from ..core.models import AgentKind, AgentResult, ClaimedRun, Task
 from ..runtimes.container.policy import CONTAINER_INSTRUCTIONS, CONTAINER_TURN_PREFIX
 from ..runtimes.gpu.policy import GPU_INSTRUCTIONS, GPU_TURN_PREFIX
 
@@ -203,6 +210,27 @@ class CodexAdapter(AgentAdapter):
             )
         return [], ""
 
+    async def execute(
+        self,
+        run: ClaimedRun,
+        on_pid: PidCallback,
+        on_session: SessionCallback | None = None,
+        on_progress: ProgressCallback | None = None,
+    ) -> AgentResult:
+        if run.operation != "compact":
+            return await super().execute(run, on_pid, on_session, on_progress)
+        from .compact import execute_compaction
+
+        runtime_config, _ = self._runtime_parts(run.task_id, run.project_alias, run.run_id)
+        command = [
+            self.executable,
+            "-c", "sandbox_workspace_write.network_access="
+            + ("true" if self.tool_network_enabled else "false"),
+            *runtime_config,
+            "app-server",
+        ]
+        return await execute_compaction(run, command, self.environment(), on_pid, on_progress)
+
     def build_command(self, run: ClaimedRun, last_message_path: Path) -> list[str]:
         runtime_config, prompt_prefix = self._runtime_parts(
             run.task_id, run.project_alias, run.run_id
@@ -216,13 +244,13 @@ class CodexAdapter(AgentAdapter):
             + ("true" if self.tool_network_enabled else "false"),
             *runtime_config,
             "exec",
-            *model_args,
         ]
         output = ["--json", "--output-last-message", str(last_message_path)]
         if run.session_id:
             return [
                 *common,
                 "resume",
+                *model_args,
                 "--skip-git-repo-check",
                 *output,
                 run.session_id,
@@ -230,6 +258,7 @@ class CodexAdapter(AgentAdapter):
             ]
         return [
             *common,
+            *model_args,
             *output,
             "--sandbox",
             "workspace-write",

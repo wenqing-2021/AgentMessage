@@ -179,6 +179,7 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
                 """
             )
+            self._add_column_if_missing("task_messages", "operation", "TEXT NOT NULL DEFAULT 'message'")
             self._add_column_if_missing("tasks", "origin", "TEXT NOT NULL DEFAULT 'task'")
             self._add_column_if_missing("chat_context", "default_chat_task_id", "TEXT")
 
@@ -376,7 +377,11 @@ class StateStore:
             ).fetchone()
             return self._row_to_task(row) if row else None
 
-    def queue_message(self, task_id: str, owner_open_id: str, content: str) -> Task | None:
+    def queue_message(
+        self, task_id: str, owner_open_id: str, content: str, *, operation: str = "message"
+    ) -> Task | None:
+        if operation not in {"message", "compact"}:
+            raise ValueError("Unknown message operation")
         timestamp = _now()
         with self._lock, self._connection:
             row = self._connection.execute(
@@ -385,6 +390,8 @@ class StateStore:
             if row is None:
                 return None
             task = self._row_to_task(row)
+            if operation == "compact" and (task.agent != AgentKind.CODEX or not task.session_id):
+                return None
             if task.status == TaskStatus.STOPPED:
                 # A user continuation is explicitly allowed to revive a stopped session.
                 next_status = TaskStatus.QUEUED.value
@@ -393,8 +400,8 @@ class StateStore:
             else:
                 next_status = TaskStatus.QUEUED.value
             self._connection.execute(
-                "INSERT INTO task_messages(task_id, content, status, created_at) VALUES (?, ?, ?, ?)",
-                (task_id, content, MessageStatus.QUEUED.value, timestamp),
+                "INSERT INTO task_messages(task_id, content, status, created_at, operation) VALUES (?, ?, ?, ?, ?)",
+                (task_id, content, MessageStatus.QUEUED.value, timestamp, operation),
             )
             self._connection.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
@@ -449,7 +456,7 @@ class StateStore:
         with self._lock, self._connection:
             row = self._connection.execute(
                 """
-                SELECT m.id AS message_id, m.task_id, m.content, t.project_alias, t.agent,
+                SELECT m.id AS message_id, m.task_id, m.content, m.operation, t.project_alias, t.agent,
                        t.session_id, t.chat_id
                 FROM task_messages m
                 JOIN tasks t ON t.id = m.task_id
@@ -508,6 +515,7 @@ class StateStore:
                 chat_id=row["chat_id"],
                 log_path=log_path,
                 model=model,
+                operation=row["operation"],
             )
 
     def set_run_pid(self, run_id: int, pid: int) -> None:

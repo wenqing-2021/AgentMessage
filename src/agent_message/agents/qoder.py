@@ -24,7 +24,6 @@ _BLOCKED_RULES = (
     "Bash(rm -rf:*)",
     "Bash(git reset --hard:*)",
     "Bash(git clean:*)",
-    "Bash(git push:*)",
     "Bash(npm publish:*)",
     "Bash(twine upload:*)",
     "WebFetch",

@@ -72,6 +72,7 @@ class ClaimedRun:
     chat_id: str
     log_path: Path
     model: str | None = None
+    operation: str = "message"
 
 
 @dataclass(frozen=True)
