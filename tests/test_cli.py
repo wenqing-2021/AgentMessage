@@ -89,9 +89,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("sandbox_workspace_write.network_access=false", command)
             self.assertEqual(command[-1], "thread-1")
 
-    def test_resume_injects_gpu_mcp_for_gpu_project(self) -> None:
+    def test_resume_injects_sandbox_mcp_for_sandbox_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            config = make_config(Path(temp), gpu_projects=("alpha",))
+            config = make_config(Path(temp), sandbox_gpu_projects=("alpha",))
             state = StateStore(config)
             try:
                 task = state.create_task(
@@ -107,7 +107,7 @@ class CliTests(unittest.TestCase):
                     run_id=claimed.run_id,
                     task_id=task.id,
                     exit_code=0,
-                    session_id="thread-gpu",
+                    session_id="thread-sandbox",
                     final_message="done",
                     error=None,
                 )
@@ -122,8 +122,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             command = run.call_args.args[0]
             joined = "\n".join(command)
-            self.assertIn("mcp_servers.agent_message_bwrap_gpu.command", joined)
-            self.assertIn("agent_message.runtimes.gpu.mcp", joined)
+            self.assertIn("mcp_servers.agent_message_sandbox.command", joined)
+            self.assertIn("agent_message.runtimes.sandbox.mcp", joined)
 
     def test_resume_injects_container_mcp_for_container_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

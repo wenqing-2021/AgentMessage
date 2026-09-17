@@ -164,9 +164,9 @@ class SchedulerTests(unittest.TestCase):
             finally:
                 state.close()
 
-    def test_gpu_monitor_forwards_sanitized_bounded_log_progress(self) -> None:
+    def test_sandbox_monitor_forwards_sanitized_bounded_log_progress(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            config = make_config(Path(temp), gpu_projects=("alpha",))
+            config = make_config(Path(temp), sandbox_gpu_projects=("alpha",))
             state = StateStore(config)
             try:
                 task = state.create_task(
@@ -178,7 +178,7 @@ class SchedulerTests(unittest.TestCase):
                 )
                 claimed = state.claimed_run()
                 assert claimed is not None
-                job = state.create_gpu_job(
+                job = state.create_sandbox_job(
                     task_id=task.id,
                     run_id=claimed.run_id,
                     argv=["python", "train.py"],
@@ -195,12 +195,12 @@ class SchedulerTests(unittest.TestCase):
                 async def monitor_once() -> None:
                     stop = asyncio.Event()
                     stop.set()
-                    await scheduler._monitor_gpu_progress(claimed, stop)
+                    await scheduler._monitor_sandbox_progress(claimed, stop)
 
                 asyncio.run(monitor_once())
                 self.assertEqual(len(replies), 2)
-                self.assertIn(f"GPU 作业 {job.id} 已启动", replies[0])
-                self.assertIn("GPU 进度", replies[1])
+                self.assertIn(f"沙箱作业 {job.id} 已启动", replies[0])
+                self.assertIn("沙箱进度", replies[1])
                 self.assertNotIn("\x1b", replies[1])
                 self.assertLessEqual(len(replies[1].split("：\n", 1)[1]), 1000)
             finally:
@@ -208,7 +208,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_stop_signals_codex_and_gpu_process_groups(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            config = make_config(Path(temp), gpu_projects=("alpha",))
+            config = make_config(Path(temp), sandbox_gpu_projects=("alpha",))
             state = StateStore(config)
             try:
                 task = state.create_task(
@@ -221,13 +221,13 @@ class SchedulerTests(unittest.TestCase):
                 claimed = state.claimed_run()
                 assert claimed is not None
                 state.set_run_pid(claimed.run_id, 111)
-                job = state.create_gpu_job(
+                job = state.create_sandbox_job(
                     task_id=task.id,
                     run_id=claimed.run_id,
                     argv=["python", "train.py"],
                     cwd=".",
                 )
-                state.set_gpu_job_pid(job.id, 222)
+                state.set_sandbox_job_pid(job.id, 222)
                 scheduler = Scheduler(config, state, lambda _chat, _text: None)
 
                 async def no_sleep(_seconds: float) -> None:
@@ -248,7 +248,7 @@ class SchedulerTests(unittest.TestCase):
                         (222, signal.SIGKILL),
                     ],
                 )
-                latest = state.latest_gpu_job(task.id)
+                latest = state.latest_sandbox_job(task.id)
                 assert latest is not None
                 self.assertEqual(latest.status, "stopping")
             finally:

@@ -17,8 +17,8 @@ from ..runtimes.container.runner import terminate_container_process
 
 Notify = Callable[[str, str], Awaitable[None] | None]
 _ANSI_ESCAPE = re.compile(r"\x1b(?:[@-_][0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
-_GPU_POLL_SECONDS = 2.0
-_GPU_PROGRESS_SECONDS = 30.0
+_SANDBOX_POLL_SECONDS = 2.0
+_SANDBOX_PROGRESS_SECONDS = 30.0
 
 
 class Scheduler:
@@ -85,13 +85,13 @@ class Scheduler:
             last_progress = message
             await self._send(claimed.chat_id, f"任务 {claimed.task_id} 进度：{message}")
 
-        gpu_monitor_stop = asyncio.Event()
-        gpu_monitor = asyncio.create_task(
-            self._monitor_gpu_progress(claimed, gpu_monitor_stop),
-            name=f"agent-message-gpu-progress-{claimed.task_id}",
+        sandbox_monitor_stop = asyncio.Event()
+        sandbox_monitor = asyncio.create_task(
+            self._monitor_sandbox_progress(claimed, sandbox_monitor_stop),
+            name=f"agent-message-sandbox-progress-{claimed.task_id}",
         )
         container_monitor = asyncio.create_task(
-            self._monitor_container_progress(claimed, gpu_monitor_stop),
+            self._monitor_container_progress(claimed, sandbox_monitor_stop),
             name=f"agent-message-container-progress-{claimed.task_id}",
         )
         try:
@@ -100,8 +100,8 @@ class Scheduler:
             except Exception as exc:  # The worker must survive adapter implementation errors.
                 result = AgentResult(1, claimed.session_id, "", f"启动 agent 失败：{exc}")
         finally:
-            gpu_monitor_stop.set()
-            await asyncio.gather(gpu_monitor, container_monitor)
+            sandbox_monitor_stop.set()
+            await asyncio.gather(sandbox_monitor, container_monitor)
         task = self.state.finish_run(
             run_id=claimed.run_id,
             task_id=claimed.task_id,
@@ -118,7 +118,7 @@ class Scheduler:
             await self._send(claimed.chat_id, f"任务 {task.id} 已完成。\n\n{summary}")
         self.wake.set()
 
-    async def _monitor_gpu_progress(
+    async def _monitor_sandbox_progress(
         self, claimed: ClaimedRun, stop_event: asyncio.Event
     ) -> None:
         current_job_id: int | None = None
@@ -126,7 +126,7 @@ class Scheduler:
         last_output = ""
         last_sent_at = 0.0
         while True:
-            job = self.state.latest_gpu_job(claimed.task_id)
+            job = self.state.latest_sandbox_job(claimed.task_id)
             now = asyncio.get_running_loop().time()
             if job is not None:
                 if job.id != current_job_id:
@@ -136,21 +136,21 @@ class Scheduler:
                     last_sent_at = 0.0
                     await self._send(
                         claimed.chat_id,
-                        f"任务 {claimed.task_id} GPU 作业 {job.id} 已启动。",
+                        f"任务 {claimed.task_id} 沙箱作业 {job.id} 已启动。",
                     )
                 if job.status in {"running", "stopping"}:
-                    raw = "\n".join(self.state.tail_gpu_log(claimed.task_id, 12))
+                    raw = "\n".join(self.state.tail_sandbox_log(claimed.task_id, 12))
                     output = _ANSI_ESCAPE.sub("", raw).strip()[-1000:]
                     if (
                         output
                         and output != last_output
-                        and now - last_sent_at >= _GPU_PROGRESS_SECONDS
+                        and now - last_sent_at >= _SANDBOX_PROGRESS_SECONDS
                     ):
                         last_output = output
                         last_sent_at = now
                         await self._send(
                             claimed.chat_id,
-                            f"任务 {claimed.task_id} GPU 进度：\n{output}",
+                            f"任务 {claimed.task_id} 沙箱进度：\n{output}",
                         )
                 if job.status != current_status:
                     current_status = job.status
@@ -164,13 +164,13 @@ class Scheduler:
                         suffix = f"：{job.error}" if job.error else "。"
                         await self._send(
                             claimed.chat_id,
-                            f"任务 {claimed.task_id} GPU 作业 {job.id} "
+                            f"任务 {claimed.task_id} 沙箱作业 {job.id} "
                             f"{labels[job.status]}{suffix}",
                         )
             if stop_event.is_set():
                 return
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=_GPU_POLL_SECONDS)
+                await asyncio.wait_for(stop_event.wait(), timeout=_SANDBOX_POLL_SECONDS)
             except asyncio.TimeoutError:
                 pass
 
@@ -201,7 +201,7 @@ class Scheduler:
                     if (
                         output
                         and output != last_output
-                        and now - last_sent_at >= _GPU_PROGRESS_SECONDS
+                        and now - last_sent_at >= _SANDBOX_PROGRESS_SECONDS
                     ):
                         last_output = output
                         last_sent_at = now
@@ -227,7 +227,7 @@ class Scheduler:
             if stop_event.is_set():
                 return
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=_GPU_POLL_SECONDS)
+                await asyncio.wait_for(stop_event.wait(), timeout=_SANDBOX_POLL_SECONDS)
             except asyncio.TimeoutError:
                 pass
 
@@ -241,11 +241,11 @@ class Scheduler:
 
     async def stop(self, task_id: str) -> bool:
         pid = self.state.running_pid(task_id)
-        gpu_pids = self.state.mark_gpu_jobs_stopping(task_id)
+        sandbox_pids = self.state.mark_sandbox_jobs_stopping(task_id)
         container_jobs = self.state.mark_container_jobs_stopping(task_id)
-        if pid is None and not gpu_pids and not container_jobs:
+        if pid is None and not sandbox_pids and not container_jobs:
             return False
-        pids = ([pid] if pid is not None else []) + gpu_pids + [
+        pids = ([pid] if pid is not None else []) + sandbox_pids + [
             job.pid for job in container_jobs if job.pid is not None
         ]
         await self._signal_container_jobs(container_jobs, signal.SIGTERM)

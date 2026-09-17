@@ -258,7 +258,7 @@ class RouterAndStateTests(unittest.TestCase):
                 }
                 self.assertIn("operation", message_columns)
                 gpu_table = state._connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gpu_jobs'"
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sandbox_jobs'"
                 ).fetchone()
                 self.assertIsNotNone(gpu_table)
                 container_table = state._connection.execute(
@@ -373,6 +373,65 @@ class ModelCommandTests(unittest.TestCase):
         self.state.close()
         self.temp.cleanup()
 
+    def test_numbered_models_effort_and_wraparound(self) -> None:
+        models = [CodexModel("first", "First", ("low", "high"), "low"),
+                  CodexModel("second", "Second", ("medium",), "medium")]
+        with patch("agent_message.orchestration.router.list_codex_models", return_value=models):
+            listed = self.router.handle(inbound("/model", "list", "list"))[0]
+            self.assertIn("1. first", listed)
+            self.assertIn("2. second", listed)
+            for index, (command, model, effort) in enumerate([
+                ("/model 1 high", "first", "high"),
+                ("/model next", "second", "medium"),
+                ("/model next", "first", "low"),
+                ("/model prev", "second", "medium"),
+                ("/model 1 high", "first", "high"),
+                ("/model effort default", "first", "low"),
+                ("/model effort high", "first", "high"),
+            ]):
+                self.router.handle(inbound(command, str(index), str(index)))
+                self.assertEqual(self.state.get_setting("codex_model"), model)
+                self.assertEqual(self.state.get_setting("codex_reasoning_effort"), effort)
+            self.state.close()
+            self.state = StateStore(self.config)
+            self.assertEqual(self.state.get_setting("codex_reasoning_effort"), "high")
+
+    def test_invalid_model_selection_does_not_change_settings(self) -> None:
+        self.state.set_settings({"codex_model": "first", "codex_reasoning_effort": "low"})
+        with patch("agent_message.orchestration.router.list_codex_models", return_value=[
+            CodexModel("first", "First", ("low",), "low")
+        ]):
+            for index, command in enumerate([
+                "/model 0", "/model 2", "/model " + "9" * 5000,
+                "/model 1 high", "/model effort wrong", "/model effort",
+                '/model "bad\x01name"', "/model 1 low extra",
+            ]):
+                self.router.handle(inbound(command, str(index), str(index)))
+                self.assertEqual(self.state.get_setting("codex_model"), "first")
+                self.assertEqual(self.state.get_setting("codex_reasoning_effort"), "low")
+
+    def test_default_effort_without_metadata_does_not_silently_reuse_session_effort(self) -> None:
+        self.state.set_settings({"codex_model": "first", "codex_reasoning_effort": "high"})
+        with patch("agent_message.orchestration.router.list_codex_models", return_value=[
+            CodexModel("first", "First")
+        ]), patch("agent_message.orchestration.router.configured_reasoning_effort", return_value=None):
+            reply = self.router.handle(inbound("/model effort default"))
+        self.assertIn("未提供可用默认强度", reply[0])
+        self.assertEqual(self.state.get_setting("codex_reasoning_effort"), "high")
+
+    def test_model_switch_authorization_and_duplicate_event(self) -> None:
+        self.state.set_setting("codex_model", "first")
+        with patch("agent_message.orchestration.router.list_codex_models", return_value=[
+            CodexModel("first", "First"), CodexModel("second", "Second")
+        ]):
+            self.router.handle(inbound("/model next"))
+            self.assertEqual(self.state.get_setting("codex_model"), "second")
+            self.assertEqual(self.router.handle(inbound("/model next")), [])
+            self.assertEqual(self.state.get_setting("codex_model"), "second")
+            with patch.object(self.state, "is_authorized", return_value=False):
+                self.assertEqual(self.router.handle(inbound("/model prev", "e2", "m2")), [])
+            self.assertEqual(self.state.get_setting("codex_model"), "second")
+
     def test_model_lists_available_models(self) -> None:
         models = [
             CodexModel("gpt-5.6-sol", "GPT-5.6-Sol"),
@@ -419,7 +478,7 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(run.model, "deepseek/deepseek-v4-pro")
 
     def test_model_switch_applies_to_queued_turn_in_same_session(self) -> None:
-        self.state.set_setting("codex_model", "old-model")
+        self.state.set_settings({"codex_model": "old-model", "codex_reasoning_effort": "low"})
         self.router.handle(inbound("hello", "e1", "m1"))
         first = self.state.claimed_run()
         assert first is not None
@@ -428,9 +487,10 @@ class ModelCommandTests(unittest.TestCase):
             "agent_message.orchestration.router.list_codex_models",
             return_value=[CodexModel("new-model", "New Model")],
         ):
-            reply = self.router.handle(inbound("/model new-model", "e3", "m3"))
+            reply = self.router.handle(inbound("/model new-model high", "e3", "m3"))
         self.assertIn("当前 session", reply[0])
         self.assertEqual(first.model, "old-model")
+        self.assertEqual(first.reasoning_effort, "low")
         self.assertIsNone(self.state.claimed_run())
         self.state.finish_run(
             run_id=first.run_id,
@@ -445,4 +505,5 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(second.task_id, first.task_id)
         self.assertEqual(second.session_id, "existing-thread")
         self.assertEqual(second.model, "new-model")
+        self.assertEqual(second.reasoning_effort, "high")
         self.assertEqual(second.prompt, "continue")

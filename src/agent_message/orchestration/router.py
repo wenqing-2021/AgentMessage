@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from ..agents.model_catalog import configured_codex_model, list_codex_models
+from ..agents.model_catalog import (
+    REASONING_EFFORTS, configured_codex_model, configured_reasoning_effort, list_codex_models,
+)
 from .commands import HELP_TEXT, CommandError, NewTaskCommand, SimpleCommand, parse_command
 from ..core.config import AppConfig
 from ..core.models import AgentKind, InboundMessage, Task, TaskOrigin, TaskStatus
@@ -18,7 +20,7 @@ def _valid_model_name(name: str) -> bool:
     return (
         bool(name)
         and len(name) <= 200
-        and "\x00" not in name
+        and all(ord(ch) >= 32 and ord(ch) != 127 for ch in name)
         and not any(ch.isspace() for ch in name)
     )
 
@@ -162,8 +164,8 @@ class MessageRouter:
             if task is None:
                 return ["找不到该任务 ID。发送 /status 查看可用任务。"]
             lines = (
-                self.state.tail_gpu_log(task.id, command.log_lines or 20)
-                if command.log_source == "gpu"
+                self.state.tail_sandbox_log(task.id, command.log_lines or 20)
+                if command.log_source == "sandbox"
                 else (
                     self.state.tail_container_log(task.id, command.log_lines or 20)
                     if command.log_source == "container"
@@ -174,36 +176,66 @@ class MessageRouter:
         raise AssertionError(f"unhandled command: {command.name}")
 
     def _model(self, command: SimpleCommand) -> list[str]:
+        models = list_codex_models()
+        current = self.state.get_setting("codex_model") or configured_codex_model()
+        effort = self.state.get_setting("codex_reasoning_effort") or configured_reasoning_effort()
         if command.model_name is None:
-            models = list_codex_models()
-            current = self.state.get_setting("codex_model") or configured_codex_model()
             if not models:
-                return [
-                    "无法读取 Codex 模型目录：请确认 opencodex 已配置，"
-                    "且 ~/.codex/config.toml 的 model_catalog_json 指向有效目录。"
-                ]
-            lines = ["可用 Codex 模型："]
-            for model in models:
-                if model.display_name and model.display_name != model.slug:
-                    label = f"{model.slug}（{model.display_name}）"
-                else:
-                    label = model.slug
+                return ["无法读取 Codex 模型目录：请确认 model_catalog_json 指向有效目录。"]
+            lines = ["可用 Codex 模型（按目录顺序编号）："]
+            for index, model in enumerate(models, 1):
+                label = model.slug
+                if model.display_name != model.slug:
+                    label += f"（{model.display_name}）"
                 if model.slug == current:
                     label += "（当前）"
-                lines.append(f"- {label}")
-            lines.append(f"当前模型：{current or '未设置（使用 Codex 配置默认）'}")
-            lines.append("发送 /model <模型名称> 切换，例如 /model deepseek/deepseek-v4-pro。")
+                levels = (
+                    "、".join(model.reasoning_levels) or "不支持"
+                    if model.reasoning_levels is not None else "目录未声明"
+                )
+                lines.append(f"{index}. {label}；思考强度：{levels}")
+            lines.append(f"当前模型：{current or 'Codex 默认'}；思考强度：{effort or '模型默认'}")
+            lines.append("发送 /model 1 或 /model <模型名称> 切换；/model next、/model prev 按顺序循环切换。")
+            lines.append("/model 1 high 同时设置强度；/model effort high 仅设置强度；强度 default 恢复默认。")
             return ["\n".join(lines)]
 
         name = command.model_name
+        if name == "effort":
+            if not current:
+                return ["请先通过 /model <编号或名称> 选择模型。"]
+            name = current
+        elif name in {"next", "prev"}:
+            if not models:
+                return ["无法读取模型目录，请先发送 /model 检查配置。"]
+            index = next((i for i, model in enumerate(models) if model.slug == current), None)
+            if index is None:
+                index = 0 if name == "next" else len(models) - 1
+            else:
+                index = (index + (1 if name == "next" else -1)) % len(models)
+            name = models[index].slug
+        elif name.isascii() and name.isdecimal():
+            if len(name) > 6 or not 1 <= int(name) <= len(models):
+                return ["模型编号超出范围，请发送 /model 查看当前编号。"]
+            name = models[int(name) - 1].slug
         if not _valid_model_name(name):
             return ["模型名称不能为空，且不能包含空白或控制字符。发送 /model 查看可用模型。"]
-        models = list_codex_models()
-        if models and all(model.slug != name for model in models):
-            available = "、".join(model.slug for model in models[:10])
-            return [f"未知模型：{name}。发送 /model 查看完整列表（前几个：{available}）。"]
-        self.state.set_setting("codex_model", name)
-        return [f"已切换 Codex 模型为 {name}；从下一轮 Codex 执行起生效，包括当前 session；正在运行的轮次不变。"]
+        model = next((model for model in models if model.slug == name), None)
+        if models and model is None:
+            return [f"未知模型：{name}。发送 /model 查看完整列表。"]
+        requested = command.reasoning_effort
+        levels = model.reasoning_levels if model else None
+        if requested is not None and requested != "default":
+            if requested not in REASONING_EFFORTS or (levels is not None and requested not in levels):
+                return [f"模型 {name} 不支持思考强度 {requested}；可用：{'、'.join(levels if levels is not None else REASONING_EFFORTS) or '无'}。"]
+            effort = requested
+        elif requested == "default" or (levels is not None and effort not in levels):
+            effort = (model.default_reasoning_level if model else None) or configured_reasoning_effort()
+            if levels is not None and effort not in levels:
+                effort = levels[0] if levels else None
+            if requested == "default" and effort is None:
+                return ["模型目录和 Codex 配置未提供可用默认强度，请通过 /model 查看并指定强度。"]
+        self.state.set_settings({"codex_model": name, "codex_reasoning_effort": effort})
+        return [f"已切换 Codex 模型为 {name}；思考强度：{effort or '模型默认'}；从下一轮 Codex 执行起生效，包括当前 session；正在运行的轮次不变。"]
 
     def _format_task(self, task: Task) -> str:
         session = task.session_id or "尚未创建"
@@ -213,9 +245,9 @@ class MessageRouter:
             if task.origin.value == "chat"
             else "独立任务"
         )
-        gpu_job = self.state.latest_gpu_job(task.id)
-        gpu_status = (
-            f"{gpu_job.status}（作业 {gpu_job.id}）" if gpu_job is not None else "暂无"
+        sandbox_job = self.state.latest_sandbox_job(task.id)
+        sandbox_status = (
+            f"{sandbox_job.status}（作业 {sandbox_job.id}）" if sandbox_job is not None else "暂无"
         )
         container_job = self.state.latest_container_job(task.id)
         container_status = (
@@ -230,7 +262,7 @@ class MessageRouter:
             f"项目：{task.project_alias}\n"
             f"Agent：{task.agent.value}\n"
             f"状态：{task.status.value}\n"
-            f"GPU：{gpu_status}\n"
+            f"沙箱：{sandbox_status}\n"
             f"容器：{container_status}\n"
             f"会话：{session}\n"
             f"最近反馈：{summary[:500]}"

@@ -18,6 +18,64 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.service.default_chat_project, "alpha")
             self.assertFalse(config.service.codex_tool_network)
 
+    def test_global_sandbox_git_identity_and_ssh_shared_by_projects(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp), ("alpha", "beta", "plain"), sandbox_gpu_projects=("alpha", "beta"))
+            original = config.config_path.read_text()
+            settings = ('sandbox_git_user_name = "Example User"\n'
+                'sandbox_git_user_email = "example@example.com"\n'
+                'sandbox_ssh_agent_socket = "/run/user/1000/test.sock"\n'
+                'sandbox_ssh_known_hosts = "/home/example/.ssh/known_hosts"\n')
+            config.config_path.write_text(original.replace("[service]\n", "[service]\n" + settings))
+            loaded = load_config(config.config_path)
+            self.assertEqual(loaded.service.sandbox_git_user_name, "Example User")
+            for alias in ("alpha", "beta"):
+                sandbox = loaded.projects[alias].sandbox
+                assert sandbox is not None
+                self.assertTrue(sandbox.gpu)
+                self.assertEqual(sandbox.git_user_name, "Example User")
+                self.assertEqual(sandbox.git_user_email, "example@example.com")
+                self.assertEqual(sandbox.ssh_agent_socket, Path("/run/user/1000/test.sock"))
+                self.assertEqual(sandbox.ssh_known_hosts, loaded.service.sandbox_ssh_known_hosts)
+                self.assertFalse(sandbox.network)
+            self.assertIsNone(loaded.projects["plain"].sandbox)
+            # Legacy gpu_* service keys keep working and still imply GPU passthrough.
+            config.config_path.write_text(
+                original.replace("[service]\n", "[service]\n" + settings.replace("sandbox_", "gpu_"))
+            )
+            legacy = load_config(config.config_path)
+            self.assertEqual(legacy.service.sandbox_git_user_name, "Example User")
+            self.assertEqual(legacy.projects["alpha"].sandbox.git_user_name, "Example User")
+            self.assertTrue(legacy.projects["alpha"].sandbox.gpu)
+
+    def test_global_gpu_git_config_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp))
+            original = config.config_path.read_text()
+            for settings in (
+                'sandbox_git_user_name = 42', 'sandbox_git_user_email = ""',
+                'gpu_git_user_name = "bad\\nname"',
+                'sandbox_ssh_agent_socket = "relative"',
+                'sandbox_ssh_agent_socket = "/run/../tmp/test.sock"',
+                'sandbox_ssh_agent_socket = "/tmp/test.sock"',
+                'sandbox_ssh_known_hosts = "/tmp/hosts"',
+                'gpu_ssh_agent_socket = "relative"',
+            ):
+                config.config_path.write_text(original.replace("[service]\n", "[service]\n" + settings + "\n"))
+                with self.subTest(settings=settings), self.assertRaisesRegex(ConfigError, r"\[service\]"):
+                    load_config(config.config_path)
+
+    def test_project_git_settings_report_global_location(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp))
+            original = config.config_path.read_text()
+            for key, value in (("git_user_name", "Example User"), ("git_user_email", "example@example.com"),
+                               ("ssh_agent_socket", "/tmp/test.sock"), ("ssh_known_hosts", "/tmp/hosts")):
+                for settings in (f'gpu_{key} = "{value}"', f'[projects.alpha.gpu]\n{key} = "{value}"'):
+                    config.config_path.write_text(original + "\n" + settings + "\n")
+                    with self.subTest(settings=settings), self.assertRaisesRegex(ConfigError, r"global \[service\]"):
+                        load_config(config.config_path)
+
     def test_rejects_relative_project_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "projects.toml"
@@ -99,14 +157,24 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "true or false"):
                 load_config(path)
 
-    def test_loads_gpu_project_policy(self) -> None:
+    def test_loads_sandbox_project_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            config = make_config(Path(temp), gpu_projects=("alpha",))
-            gpu = config.projects["alpha"].gpu
-            assert gpu is not None
-            self.assertTrue(gpu.enabled)
-            self.assertFalse(gpu.network)
-            self.assertEqual(gpu.timeout_seconds, 3600)
+            config = make_config(Path(temp), sandbox_gpu_projects=("alpha",))
+            sandbox = config.projects["alpha"].sandbox
+            assert sandbox is not None
+            self.assertTrue(sandbox.enabled)
+            self.assertTrue(sandbox.gpu)
+            self.assertFalse(sandbox.network)
+            self.assertEqual(sandbox.timeout_seconds, 3600)
+
+    def test_sandbox_without_gpu_is_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp), sandbox_projects=("alpha",))
+            sandbox = config.projects["alpha"].sandbox
+            assert sandbox is not None
+            self.assertTrue(sandbox.enabled)
+            self.assertFalse(sandbox.gpu)
+            self.assertEqual(sandbox.timeout_seconds, 3600)
 
     def test_gpu_network_defaults_to_enabled_when_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -127,21 +195,23 @@ class ConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            gpu = load_config(path).projects["alpha"].gpu
-            assert gpu is not None
-            self.assertTrue(gpu.network)
+            sandbox = load_config(path).projects["alpha"].sandbox
+            assert sandbox is not None
+            # Legacy gpu_* keys still imply GPU passthrough and default to networking on.
+            self.assertTrue(sandbox.gpu)
+            self.assertTrue(sandbox.network)
 
     def test_qoder_only_gpu_project_is_valid(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = make_config(
                 Path(temp),
-                gpu_projects=("alpha",),
+                sandbox_gpu_projects=("alpha",),
                 qoder_only_projects=("alpha",),
             )
             project = config.projects["alpha"]
             self.assertEqual(project.default_agent.value, "qoder")
             self.assertEqual({agent.value for agent in project.allowed_agents}, {"qoder"})
-            self.assertTrue(project.gpu and project.gpu.enabled)
+            self.assertTrue(project.sandbox and project.sandbox.enabled)
 
     def test_rejects_invalid_gpu_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -189,9 +259,10 @@ class ConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            gpu = load_config(path).projects["alpha"].gpu
-            assert gpu is not None
-            self.assertTrue(gpu.enabled)
+            sandbox = load_config(path).projects["alpha"].sandbox
+            assert sandbox is not None
+            self.assertTrue(sandbox.enabled)
+            self.assertTrue(sandbox.gpu)
 
     def test_rejects_mixed_flat_and_nested_gpu_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -211,6 +282,29 @@ class ConfigTests(unittest.TestCase):
                         "",
                         "[projects.alpha.gpu]",
                         "enabled = true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "cannot mix"):
+                load_config(path)
+
+    def test_rejects_mixing_sandbox_and_legacy_gpu_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = root / "project"
+            project.mkdir()
+            path = root / "projects.toml"
+            path.write_text(
+                "\n".join(
+                    [
+                        "[service]",
+                        'default_chat_project = "alpha"',
+                        "",
+                        "[projects.alpha]",
+                        f'path = "{project}"',
+                        "sandbox_enabled = true",
+                        "gpu_enabled = true",
                     ]
                 ),
                 encoding="utf-8",
@@ -307,7 +401,7 @@ class ConfigTests(unittest.TestCase):
             cases = (
                 (
                     ['allowed_agents = ["codex"]', "gpu_enabled = true"],
-                    "both container execution and GPU",
+                    "both container execution and the bubblewrap sandbox",
                 ),
                 (
                     [

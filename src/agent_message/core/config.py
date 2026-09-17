@@ -19,10 +19,17 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class GpuConfig:
+class SandboxConfig:
+    """Resolved bubblewrap policy, including Git/SSH values from global service settings."""
+
     enabled: bool = False
+    gpu: bool = False
     network: bool = True
     timeout_seconds: int = 86400
+    git_user_name: str | None = None
+    git_user_email: str | None = None
+    ssh_agent_socket: Path | None = None
+    ssh_known_hosts: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -39,7 +46,7 @@ class ProjectConfig:
     path: Path
     default_agent: AgentKind
     allowed_agents: frozenset[AgentKind]
-    gpu: GpuConfig | None = None
+    sandbox: SandboxConfig | None = None
     container: ContainerConfig | None = None
 
 
@@ -51,6 +58,10 @@ class ServiceConfig:
     codex_tool_network: bool = False
     stop_grace_seconds: int = 10
     final_message_limit: int = 3500
+    sandbox_git_user_name: str | None = None
+    sandbox_git_user_email: str | None = None
+    sandbox_ssh_agent_socket: Path | None = None
+    sandbox_ssh_known_hosts: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +121,31 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(codex_tool_network, bool):
         raise ConfigError("[service].codex_tool_network must be true or false")
 
+    git_identity: dict[str, str] = {}
+    ssh_paths: dict[str, Path] = {}
+    for key in ("git_user_name", "git_user_email", "ssh_agent_socket", "ssh_known_hosts"):
+        # sandbox_* is canonical; gpu_* remains accepted so existing installs keep working.
+        value = service_raw.get("sandbox_" + key)
+        if value is None:
+            value = service_raw.get("gpu_" + key)
+        if value is None:
+            continue
+        if (not isinstance(value, str) or not value.strip()
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            raise ConfigError(f"[service].sandbox_{key} must be a non-empty single-line string")
+        value = value.strip()
+        if key.startswith("ssh_"):
+            candidate = Path(value)
+            if not candidate.is_absolute() or ".." in candidate.parts:
+                raise ConfigError(f"[service].sandbox_{key} must be an absolute path without ..")
+            ssh_paths[key] = candidate
+        else:
+            git_identity[key] = value
+    if ("ssh_agent_socket" in ssh_paths) != ("ssh_known_hosts" in ssh_paths):
+        raise ConfigError(
+            "[service] requires both sandbox_ssh_agent_socket and sandbox_ssh_known_hosts"
+        )
+
     projects_raw = raw.get("projects")
     if not isinstance(projects_raw, dict) or not projects_raw:
         raise ConfigError("define at least one [projects.<alias>] entry")
@@ -134,41 +170,90 @@ def load_config(path: str | Path) -> AppConfig:
         default = _parse_agent(project_raw.get("default_agent", "codex"), f"projects.{alias}.default_agent")
         if default not in allowed:
             raise ConfigError(f"projects.{alias}.default_agent must be listed in allowed_agents")
-        flat_gpu_keys = {"gpu_enabled", "gpu_network", "gpu_timeout_seconds"}
-        has_flat_gpu = any(key in project_raw for key in flat_gpu_keys)
-        legacy_gpu_raw = project_raw.get("gpu")
-        if has_flat_gpu and legacy_gpu_raw is not None:
-            raise ConfigError(
-                f"projects.{alias} cannot mix flat GPU settings with the legacy gpu table"
-            )
-        if legacy_gpu_raw is not None and not isinstance(legacy_gpu_raw, dict):
+        for legacy_key in (
+            "gpu_git_user_name", "gpu_git_user_email",
+            "gpu_ssh_agent_socket", "gpu_ssh_known_hosts",
+        ):
+            if legacy_key in project_raw:
+                raise ConfigError(
+                    f"projects.{alias}: move Git/SSH settings to the global [service] table"
+                )
+        new_sandbox_keys = (
+            "sandbox_enabled", "sandbox_gpu", "sandbox_network", "sandbox_timeout_seconds"
+        )
+        legacy_flat_keys = ("gpu_enabled", "gpu_network", "gpu_timeout_seconds")
+        legacy_table = project_raw.get("gpu")
+        if legacy_table is not None and not isinstance(legacy_table, dict):
             raise ConfigError(f"projects.{alias}.gpu must be a TOML table")
-        gpu_raw = (
-            {
+        declared = [
+            any(key in project_raw for key in new_sandbox_keys),
+            any(key in project_raw for key in legacy_flat_keys),
+            isinstance(legacy_table, dict),
+        ]
+        if sum(declared) > 1:
+            raise ConfigError(
+                f"projects.{alias} cannot mix sandbox_* keys with legacy gpu_* keys "
+                "or the legacy gpu table"
+            )
+        sandbox_raw: dict[str, object] | None = None
+        if declared[0]:
+            sandbox_raw = {
+                "enabled": project_raw.get("sandbox_enabled", False),
+                "gpu": project_raw.get("sandbox_gpu", False),
+                "network": project_raw.get("sandbox_network", True),
+                "timeout_seconds": project_raw.get("sandbox_timeout_seconds", 86400),
+            }
+        elif declared[1]:
+            # Legacy gpu_* keys described the GPU sandbox, so GPU passthrough stays on.
+            sandbox_raw = {
                 "enabled": project_raw.get("gpu_enabled", False),
+                "gpu": True,
                 "network": project_raw.get("gpu_network", True),
                 "timeout_seconds": project_raw.get("gpu_timeout_seconds", 86400),
             }
-            if has_flat_gpu
-            else legacy_gpu_raw
-        )
-        gpu: GpuConfig | None = None
-        if gpu_raw is not None:
-            assert isinstance(gpu_raw, dict)
-            enabled = gpu_raw.get("enabled", False)
-            network = gpu_raw.get("network", True)
-            timeout_seconds = gpu_raw.get("timeout_seconds", 86400)
-            if not isinstance(enabled, bool):
-                raise ConfigError(f"projects.{alias}.gpu_enabled must be true or false")
-            if not isinstance(network, bool):
-                raise ConfigError(f"projects.{alias}.gpu_network must be true or false")
+        elif declared[2]:
+            assert isinstance(legacy_table, dict)
+            for legacy_key in ("git_user_name", "git_user_email",
+                               "ssh_agent_socket", "ssh_known_hosts"):
+                if legacy_key in legacy_table:
+                    raise ConfigError(
+                        f"projects.{alias}.gpu: move Git/SSH settings to the global [service] table"
+                    )
+            sandbox_raw = {
+                "enabled": legacy_table.get("enabled", False),
+                "gpu": True,
+                "network": legacy_table.get("network", True),
+                "timeout_seconds": legacy_table.get("timeout_seconds", 86400),
+            }
+        sandbox: SandboxConfig | None = None
+        if sandbox_raw is not None:
+            enabled = sandbox_raw["enabled"]
+            gpu_passthrough = sandbox_raw["gpu"]
+            network = sandbox_raw["network"]
+            timeout_seconds = sandbox_raw["timeout_seconds"]
+            for key, value in (
+                ("sandbox_enabled", enabled),
+                ("sandbox_gpu", gpu_passthrough),
+                ("sandbox_network", network),
+            ):
+                if not isinstance(value, bool):
+                    raise ConfigError(f"projects.{alias}.{key} must be true or false")
             if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int):
-                raise ConfigError(f"projects.{alias}.gpu_timeout_seconds must be an integer")
+                raise ConfigError(
+                    f"projects.{alias}.sandbox_timeout_seconds must be an integer"
+                )
             if not 60 <= timeout_seconds <= 604800:
                 raise ConfigError(
-                    f"projects.{alias}.gpu_timeout_seconds must be between 60 and 604800"
+                    f"projects.{alias}.sandbox_timeout_seconds must be between 60 and 604800"
                 )
-            gpu = GpuConfig(enabled=enabled, network=network, timeout_seconds=timeout_seconds)
+            sandbox = SandboxConfig(
+                enabled=enabled, gpu=gpu_passthrough, network=network,
+                timeout_seconds=timeout_seconds,
+                git_user_name=git_identity.get("git_user_name"),
+                git_user_email=git_identity.get("git_user_email"),
+                ssh_agent_socket=ssh_paths.get("ssh_agent_socket"),
+                ssh_known_hosts=ssh_paths.get("ssh_known_hosts"),
+            )
         container_name = project_raw.get("container_name")
         container: ContainerConfig | None = None
         has_container_settings = any(
@@ -219,9 +304,10 @@ def load_config(path: str | Path) -> AppConfig:
                     raise ConfigError(
                         f"projects.{alias}.container_path must be an absolute path without .."
                     )
-            if gpu is not None and gpu.enabled:
+            if sandbox is not None and sandbox.enabled:
                 raise ConfigError(
-                    f"projects.{alias} cannot enable both container execution and GPU bubblewrap"
+                    f"projects.{alias} cannot enable both container execution "
+                    "and the bubblewrap sandbox"
                 )
             container = ContainerConfig(
                 name=container_name,
@@ -230,7 +316,7 @@ def load_config(path: str | Path) -> AppConfig:
                 project_path=container_path,
             )
         projects[alias] = ProjectConfig(
-            alias, project_path, default, allowed, gpu, container
+            alias, project_path, default, allowed, sandbox, container
         )
 
     if not isinstance(default_chat_project, str) or not default_chat_project.strip():
@@ -247,6 +333,10 @@ def load_config(path: str | Path) -> AppConfig:
         config_path=config_path,
         projects=projects,
         service=ServiceConfig(
-            state_dir, log_dir, default_chat_project, codex_tool_network, stop_grace, limit
+            state_dir, log_dir, default_chat_project, codex_tool_network, stop_grace, limit,
+            sandbox_git_user_name=git_identity.get("git_user_name"),
+            sandbox_git_user_email=git_identity.get("git_user_email"),
+            sandbox_ssh_agent_socket=ssh_paths.get("ssh_agent_socket"),
+            sandbox_ssh_known_hosts=ssh_paths.get("ssh_known_hosts"),
         ),
     )

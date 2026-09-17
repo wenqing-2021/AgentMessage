@@ -1,9 +1,10 @@
-"""MCP server exposing the project-scoped GPU execution tool."""
+"""MCP server exposing the project-scoped bubblewrap execution tool."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -11,24 +12,23 @@ from typing import Any
 
 from ...core.config import ConfigError, load_config
 from ...core.state import StateStore
-from .policy import GPU_INSTRUCTIONS
-from .runner import GpuRunnerError, run_bubblewrap
+from .policy import sandbox_instructions
+from .runner import SandboxRunnerError, run_bubblewrap
 
 
-SERVER_NAME = "agent-message-bwrap-gpu"
+SERVER_NAME = "agent-message-sandbox"
 SERVER_VERSION = "0.1.0"
-INSTRUCTIONS = GPU_INSTRUCTIONS
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agent-message-gpu-mcp")
+    parser = argparse.ArgumentParser(prog="agent-message-sandbox-mcp")
     parser.add_argument("--config", required=True)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--run-id", type=int)
     return parser
 
 
-class GpuMcpServer:
+class SandboxMcpServer:
     def __init__(self, config_path: str, task_id: str, run_id: int | None) -> None:
         self.config = load_config(config_path)
         self.state = StateStore(self.config)
@@ -36,8 +36,9 @@ class GpuMcpServer:
         if self.task is None:
             raise ConfigError(f"unknown task ID: {task_id}")
         self.project = self.config.projects[self.task.project_alias]
-        if self.project.gpu is None or not self.project.gpu.enabled:
-            raise ConfigError(f"GPU runner is not enabled for project {self.project.alias}")
+        if self.project.sandbox is None or not self.project.sandbox.enabled:
+            raise ConfigError(f"sandbox is not enabled for project {self.project.alias}")
+        self.instructions = sandbox_instructions(self.project.sandbox.gpu)
         self.task_id = task_id
         self.run_id = run_id
         self._write_lock = threading.Lock()
@@ -67,10 +68,10 @@ class GpuMcpServer:
     def _tools(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "gpu_run",
+                "name": "sandbox_run",
                 "description": (
-                    "Run an arbitrary command inside the current project's isolated WSL GPU "
-                    "bubblewrap sandbox. Pass the executable and each argument separately."
+                    "Run an arbitrary command inside the current project's isolated bubblewrap "
+                    "sandbox. Pass the executable and each argument separately."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -94,7 +95,7 @@ class GpuMcpServer:
                     "readOnlyHint": False,
                     "destructiveHint": True,
                     "idempotentHint": False,
-                    "openWorldHint": bool(self.project.gpu and self.project.gpu.network),
+                    "openWorldHint": bool(self.project.sandbox and self.project.sandbox.network),
                 },
             }
         ]
@@ -120,7 +121,7 @@ class GpuMcpServer:
         if not acquired:
             self._tool_response(
                 request_id,
-                {"error": "another GPU command is already running in this agent process"},
+                {"error": "another sandbox command is already running in this agent process"},
                 is_error=True,
             )
             with self._requests_lock:
@@ -136,10 +137,10 @@ class GpuMcpServer:
                 or not argv
                 or not all(isinstance(item, str) and item for item in argv)
             ):
-                raise GpuRunnerError("argv must be a non-empty array of non-empty strings")
+                raise SandboxRunnerError("argv must be a non-empty array of non-empty strings")
             if not isinstance(cwd, str):
-                raise GpuRunnerError("cwd must be a string")
-            job = self.state.create_gpu_job(
+                raise SandboxRunnerError("cwd must be a string")
+            job = self.state.create_sandbox_job(
                 task_id=self.task_id,
                 run_id=self.run_id,
                 argv=argv,
@@ -150,10 +151,10 @@ class GpuMcpServer:
                 argv,
                 cwd,
                 job.log_path,
-                on_pid=lambda pid: self.state.set_gpu_job_pid(job.id, pid),
+                on_pid=lambda pid: self.state.set_sandbox_job_pid(job.id, pid),
                 cancel_event=cancel,
             )
-            final = self.state.finish_gpu_job(
+            final = self.state.finish_sandbox_job(
                 job.id,
                 exit_code=result.exit_code,
                 error=result.error,
@@ -169,15 +170,15 @@ class GpuMcpServer:
             if result.error:
                 payload["error"] = result.error
             self._tool_response(request_id, payload, is_error=result.exit_code != 0)
-        except (GpuRunnerError, ConfigError, ValueError) as exc:
+        except (SandboxRunnerError, ConfigError, ValueError) as exc:
             if job is not None:
-                self.state.finish_gpu_job(job.id, exit_code=1, error=str(exc))
+                self.state.finish_sandbox_job(job.id, exit_code=1, error=str(exc))
             self._tool_response(request_id, {"error": str(exc)}, is_error=True)
         except Exception as exc:
             if job is not None:
-                self.state.finish_gpu_job(job.id, exit_code=1, error=f"unexpected error: {exc}")
+                self.state.finish_sandbox_job(job.id, exit_code=1, error=f"unexpected error: {exc}")
             self._tool_response(
-                request_id, {"error": f"unexpected GPU runner error: {exc}"}, is_error=True
+                request_id, {"error": f"unexpected sandbox runner error: {exc}"}, is_error=True
             )
         finally:
             self._tool_lock.release()
@@ -196,7 +197,7 @@ class GpuMcpServer:
                     "protocolVersion": protocol or "2025-03-26",
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                    "instructions": INSTRUCTIONS,
+                    "instructions": self.instructions,
                 },
             )
             return
@@ -207,7 +208,7 @@ class GpuMcpServer:
             self._result(request_id, {"tools": self._tools()})
             return
         if method == "tools/call" and "id" in message:
-            if not isinstance(params, dict) or params.get("name") != "gpu_run":
+            if not isinstance(params, dict) or params.get("name") != "sandbox_run":
                 self._error(request_id, -32602, "unknown tool")
                 return
             arguments = params.get("arguments", {})
@@ -217,7 +218,7 @@ class GpuMcpServer:
             worker = threading.Thread(
                 target=self._run_tool,
                 args=(request_id, arguments),
-                name=f"agent-message-gpu-{request_id}",
+                name=f"agent-message-sandbox-{request_id}",
                 daemon=True,
             )
             self._workers.append(worker)
@@ -255,9 +256,9 @@ class GpuMcpServer:
 def main() -> None:
     args = _parser().parse_args()
     try:
-        GpuMcpServer(args.config, args.task_id, args.run_id).run()
+        SandboxMcpServer(args.config, args.task_id, args.run_id).run()
     except (ConfigError, OSError, ValueError) as exc:
-        print(f"agent-message GPU MCP failed: {exc}", file=sys.stderr)
+        print(f"agent-message sandbox MCP failed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
 

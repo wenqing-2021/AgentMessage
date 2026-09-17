@@ -1,10 +1,10 @@
 # AgentMessage 二次开发指南
 
-本文件适用于整个仓库，供自动化编码 Agent 和维护者在修改代码前阅读。用户安装、配置和飞书命令请看中文 `README.md` 或英文 `README_EN.md`；这里记录架构边界、开发流程、扩展方法和验证要求。
+本文件适用于整个仓库，供自动化编码 Agent 和维护者在修改代码前阅读。用户安装、配置和飞书命令请看英文 `README.md` 或中文 `README_CN.md`；这里记录架构边界、开发流程、扩展方法和验证要求。
 
 ## 项目目标
 
-AgentMessage 通过飞书长连接接收单聊文本，将任务持久化后交给本机的 Codex CLI 或 Qoder CLI，并把进度与最终结果可靠地发回飞书。可选运行时允许二者在受控的 Bubblewrap GPU 沙箱或已有 Docker 容器内执行项目命令。
+AgentMessage 通过飞书长连接接收单聊文本，将任务持久化后交给本机的 Codex CLI 或 Qoder CLI，并把进度与最终结果可靠地发回飞书。可选运行时允许二者在受控的 Bubblewrap 沙箱（GPU 透传按项目配置）或已有 Docker 容器内执行项目命令。
 
 设计目标按优先级排列：
 
@@ -37,7 +37,7 @@ git diff --check
 
 ```bash
 UV_CACHE_DIR=/tmp/agent-message-uv-cache uv run agent-message --help
-UV_CACHE_DIR=/tmp/agent-message-uv-cache uv run agent-message-gpu-mcp --help
+UV_CACHE_DIR=/tmp/agent-message-uv-cache uv run agent-message-sandbox-mcp --help
 UV_CACHE_DIR=/tmp/agent-message-uv-cache uv run agent-message-container-mcp --help
 UV_CACHE_DIR=/tmp/agent-message-uv-cache uv build --out-dir /tmp/agent-message-dist
 ```
@@ -51,12 +51,12 @@ src/agent_message/
 ├── agents/                  # Codex/Qoder CLI 适配器
 ├── orchestration/           # 命令、路由、调度和服务生命周期
 ├── runtimes/
-│   ├── gpu/                 # Bubblewrap GPU policy / runner / MCP
+│   ├── sandbox/             # Bubblewrap policy / runner / MCP（GPU 透传可选）
 │   └── container/           # Docker policy / runner / MCP
 └── cli.py                   # 本地统一命令行入口
 ```
 
-仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；GPU/Bubblewrap 等较长的用户文档放在 `assets/docs/`。
+仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；Bubblewrap 沙箱等较长的用户文档放在 `assets/docs/`。
 
 保持以下依赖方向：
 
@@ -93,7 +93,7 @@ BridgeService.receive
              │
 Scheduler ──> AgentAdapter ──> Codex/Qoder process
     │                              │
-    ├── GPU/Container job monitor  └── JSONL progress/session/final text
+    ├── Sandbox/Container monitor  └── JSONL progress/session/final text
     └── finish_run ──> outbox ──> FeishuGateway.send_text
 ```
 
@@ -131,17 +131,18 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - Qoder 使用 `auto` 权限、空 `setting-sources`、显式工具列表和严格 MCP 配置；普通 Bash 允许联网，但继续限制 `sudo`、破坏性 Git 操作和发布命令。
 - Qoder 的 `result` 事件是唯一成败依据；不得把 assistant text、thinking、hook 输出或工具参数作为最终结果转发。
 - 不要以普通 Codex shell 的 CPU-only、NVML 或 `/dev/dxg` 结果判断宿主 GPU 是否可用。
+- 宿主 `workspace-write` 会把项目内 `.git`、`.agents`、`.codex` 设为只读；项目需要 Git 写入时应启用 Bubblewrap 沙箱，而不是放宽 Codex 默认沙箱。
 
-### GPU 与容器运行时
+### 沙箱与容器运行时
 
-- GPU 项目只能通过 `agent_message_bwrap_gpu` 的 `gpu_run` 执行 GPU 命令。
-- GPU 命令默认允许联网；只有显式设置 `gpu_network = false` 时才添加 network namespace 隔离。
-- GPU sandbox 只挂载当前项目和必要系统路径；项目及内部 `.git` 可写，Git 写操作通过 `gpu_run` 执行，敏感 HOME/Windows/其他项目路径不可见。
+- 启用沙箱的项目只能通过 `agent_message_sandbox` 的 `sandbox_run` 执行项目命令；`sandbox_gpu = true` 时才 dev-bind `/dev/dxg` 并加入 WSL CUDA 库路径。
+- 沙箱命令默认允许联网；只有显式设置 `sandbox_network = false` 时才添加 network namespace 隔离。
+- Bubblewrap 沙箱只挂载当前项目和必要系统路径；项目及内部 `.git` 可写，Git 写操作通过 `sandbox_run` 执行，敏感 HOME/Windows/其他项目路径不可见。
 - Container 项目只能通过 `agent_message_container` 的 `container_run` 执行项目命令。
 - Container runner 必须用 `docker inspect` 验证容器状态和宿主项目目录的可写 bind mount。
 - MCP 参数使用 `argv: list[str]` 和项目相对 `cwd`；必须拒绝逃逸项目根目录的路径。
 - 单个 MCP 进程同一时刻只运行一个工具请求，并支持取消、超时、SIGTERM/SIGKILL 和持久化日志。
-- 当前配置不允许同一项目同时启用 GPU Bubblewrap 和 Container。容器项目使用 Qoder 时不得提供宿主 Bash，只能暴露精确的 `container_run` MCP 工具。
+- 当前配置不允许同一项目同时启用 Bubblewrap 沙箱和 Container。容器项目使用 Qoder 时不得提供宿主 Bash，只能暴露精确的 `container_run` MCP 工具。
 - Docker socket 等价于高权限宿主控制接口；不要弱化相关文档或校验。
 
 ## 已知兼容性约束
@@ -151,6 +152,8 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - `lark-oapi` 的 WebSocket 客户端会捕获事件循环。保持 Feishu SDK 在线程内部延迟导入，并保持 `cli._run_service()` 的延迟 service import。
 - Codex 与 Qoder 的流式 JSON 结构不完全相同；解析器应容忍未知事件、超长行和缺失最终消息。
 - 移动模块时要同时更新：相对导入、`pyproject.toml` scripts、适配器中的 `python -m ...` 路径和测试 patch 路径。
+- 项目级配置以 `sandbox_enabled`、`sandbox_gpu`、`sandbox_network`、`sandbox_timeout_seconds` 为准；旧 `gpu_enabled`/`gpu_network`/`gpu_timeout_seconds`、`[projects.<alias>.gpu]` 表和 `[service].gpu_git_*`/`gpu_ssh_*` 仍可读取，等价于开启 GPU 透传，但不能与新键混用。
+- `gpu_jobs` 表已重命名为 `sandbox_jobs`；迁移必须保留历史作业记录且可重复执行。
 
 ## 常见扩展方式
 
@@ -181,7 +184,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 
 ### 新增受控执行运行时
 
-参照 `runtimes/gpu/` 或 `runtimes/container/`，保持三层结构：
+参照 `runtimes/sandbox/` 或 `runtimes/container/`，保持三层结构：
 
 - `policy.py`：注入 Agent 的强制执行说明。
 - `runner.py`：路径、环境、进程、日志、超时和终止机制。
@@ -199,14 +202,14 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 
 ## 测试文件导航
 
-- `tests/test_config.py`：TOML、白名单、GPU/Container 互斥和边界值。
+- `tests/test_config.py`：TOML、白名单、sandbox_/gpu_ 兼容键、沙箱与 Container 互斥和边界值。
 - `tests/test_router_and_state.py`：命令路由、鉴权、去重、任务选择和 SQLite 状态。
 - `tests/test_scheduler.py`：claim、并发、进度、恢复和停止信号。
 - `tests/test_adapters.py`：Codex/Qoder argv、session、MCP 注入和 JSON 流解析。
 - `tests/test_feishu.py`：飞书事件规范化；不连接真实飞书。
-- `tests/test_gpu_runner.py`：Bubblewrap 命令、隔离路径和 GPU MCP。
+- `tests/test_sandbox_runner.py`：Bubblewrap 命令、GPU 透传开关、隔离路径、作业迁移和 sandbox MCP。
 - `tests/test_container_runner.py`：Docker inspect、bind mount、命令、停止和 Container MCP。
-- `tests/test_cli.py`：doctor、selector 和本地 resume。
+- `tests/test_cli.py`：doctor、selector、沙箱探针和本地 resume。
 - `tests/helpers.py`：临时项目、配置和入站消息 fixtures。
 
 优先使用临时目录、fake adapter、mock subprocess 和 plain-dict 飞书事件。单元测试不能依赖真实凭证、网络、GPU、Docker daemon 或已登录的 Agent CLI。
@@ -222,4 +225,4 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - 配置示例和中英文 README 没有真实身份、路径、项目或容器信息。
 - 相关单元测试和全量测试通过，`git diff --check` 无错误。
 - 修改入口或包结构时，wheel 构建和全部 console scripts 已验证。
-- 只有在真实授权环境执行后，才宣称飞书、GPU、Docker 或 systemd 集成验证成功；否则明确说明只完成了静态或单元测试验证。
+- 只有在真实授权环境执行后，才宣称飞书、Bubblewrap 沙箱、GPU、Docker 或 systemd 集成验证成功；否则明确说明只完成了静态或单元测试验证。

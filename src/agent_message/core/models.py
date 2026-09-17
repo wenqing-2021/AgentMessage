@@ -73,6 +73,7 @@ class ClaimedRun:
     log_path: Path
     model: str | None = None
     operation: str = "message"
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,7 @@ class OutboxMessage:
 
 
 @dataclass(frozen=True)
-class GpuJob:
+class SandboxJob:
     id: int
     task_id: str
     run_id: int | None

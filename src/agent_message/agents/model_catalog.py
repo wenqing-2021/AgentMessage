@@ -20,12 +20,17 @@ except ModuleNotFoundError:  # Python 3.10, which remains supported by this proj
     import tomli as tomllib  # type: ignore[no-redef]
 
 
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
+
 @dataclass(frozen=True)
 class CodexModel:
     '''A single selectable model: slug is what codex -m accepts.'''
 
     slug: str
     display_name: str
+    reasoning_levels: tuple[str, ...] | None = None
+    default_reasoning_level: str | None = None
 
 
 def codex_home() -> Path:
@@ -77,7 +82,17 @@ def list_codex_models(config_path: Path | None = None) -> list[CodexModel]:
             continue
         display = item.get('display_name')
         display_name = display.strip() if isinstance(display, str) and display.strip() else slug
-        result.append(CodexModel(slug=slug.strip(), display_name=display_name))
+        levels_raw = item.get('supported_reasoning_levels')
+        levels = None
+        if isinstance(levels_raw, list):
+            levels = tuple(dict.fromkeys(
+                level['effort'] for level in levels_raw
+                if isinstance(level, dict) and level.get('effort') in REASONING_EFFORTS
+            ))
+        default = item.get('default_reasoning_level')
+        if not isinstance(default, str) or default not in REASONING_EFFORTS:
+            default = None
+        result.append(CodexModel(slug.strip(), display_name, levels, default))
     return result
 
 
@@ -93,3 +108,8 @@ def find_codex_model(name: str, config_path: Path | None = None) -> CodexModel |
         if model.slug == name:
             return model
     return None
+
+
+def configured_reasoning_effort(config_path: Path | None = None) -> str | None:
+    effort = load_codex_config(config_path).get('model_reasoning_effort')
+    return effort if isinstance(effort, str) and effort in REASONING_EFFORTS else None

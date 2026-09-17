@@ -25,8 +25,9 @@ class SimpleCommand:
     name: Literal["use", "status", "stop", "logs", "chat", "model", "compact", "help"]
     task_id: str | None = None
     log_lines: int | None = None
-    log_source: Literal["agent", "gpu", "container"] = "agent"
+    log_source: Literal["agent", "sandbox", "container"] = "agent"
     model_name: str | None = None
+    reasoning_effort: str | None = None
 
 
 ParsedCommand = NewTaskCommand | SimpleCommand | None
@@ -39,7 +40,7 @@ HELP_TEXT = """先认识 4 个概念：
 当前任务：你接下来直接发送的普通文本会继续发送到的任务。
 
 直接与默认 Agent 聊天：首次直接发送普通文本，会按默认项目的 default_agent 创建长期对话；以后普通文本会续写它。/chat 可回到该对话。
-GPU：项目启用 bubblewrap GPU 后，可直接要求 Codex 或 Qoder 运行 CUDA/JAX/训练命令；无需新增飞书命令。
+沙箱：项目设置 sandbox_enabled = true 后，Codex 或 Qoder 的项目命令一律在 bubblewrap 沙箱内执行；需要 GPU 的项目再加 sandbox_gpu = true。
 容器：项目设置 container_name 后，Codex 或 Qoder 会在宿主编辑挂载源码，并在已有容器中执行命令。
 
 例子：
@@ -52,12 +53,14 @@ GPU：项目启用 bubblewrap GPU 后，可直接要求 Codex 或 Qoder 运行 C
 /chat
 → 回到默认长期 Agent 对话；之后普通文本会继续它。
 /model
-→ 列出 Codex 可用模型；发送 /model <模型名称> 切换模型，当前 session 下一轮生效。
+→ 按顺序列出 Codex 模型编号和思考强度；/model 1 或 /model next、/model prev 切换。
+/model 1 high 或 /model effort high
+→ 同时设置模型和思考强度，或仅修改当前模型强度；下一轮生效。
 /compact
 → 压缩当前 Codex session 上下文，保留会话；若正在运行则排队。
 /status 或 /status a1b2c3d4
 /logs a1b2c3d4 50
-/logs a1b2c3d4 50 gpu
+/logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
 /stop a1b2c3d4
 
@@ -88,9 +91,12 @@ def parse_command(text: str) -> ParsedCommand:
             raise CommandError("/compact 不接收参数。")
         return SimpleCommand("compact")
     if command == "/model":
-        if len(parts) > 2:
-            raise CommandError("用法：/model [模型名称]")
-        return SimpleCommand("model", model_name=parts[1] if len(parts) == 2 else None)
+        if len(parts) > 3 or (len(parts) == 2 and parts[1] == "effort"):
+            raise CommandError("用法：/model [编号|模型名称|next|prev] [思考强度]，或 /model effort <强度|default>")
+        return SimpleCommand(
+            "model", model_name=parts[1] if len(parts) >= 2 else None,
+            reasoning_effort=parts[2].lower() if len(parts) == 3 else None,
+        )
     if command == "/new":
         if len(parts) < 3:
             raise CommandError("用法：/new <项目别名> [--agent codex|qoder] <任务>")
@@ -117,7 +123,7 @@ def parse_command(text: str) -> ParsedCommand:
                 raise CommandError(f"用法：/{name} <任务 ID>")
             return SimpleCommand(name, parts[1])
         if len(parts) not in {2, 3, 4}:
-            raise CommandError("用法：/logs <任务 ID> [行数] [agent|gpu|container]")
+            raise CommandError("用法：/logs <任务 ID> [行数] [agent|sandbox|container]")
         line_count = 20
         if len(parts) >= 3:
             try:
@@ -127,12 +133,14 @@ def parse_command(text: str) -> ParsedCommand:
         if not 1 <= line_count <= 100:
             raise CommandError("日志行数必须介于 1 和 100。")
         source = parts[3].lower() if len(parts) == 4 else "agent"
-        if source not in {"agent", "gpu", "container"}:
-            raise CommandError("日志来源只能是 agent、gpu 或 container。")
+        if source == "gpu":  # Legacy alias kept so older chats keep working.
+            source = "sandbox"
+        if source not in {"agent", "sandbox", "container"}:
+            raise CommandError("日志来源只能是 agent、sandbox 或 container。")
         return SimpleCommand(
             "logs",
             parts[1],
             line_count,
-            cast(Literal["agent", "gpu", "container"], source),
+            cast(Literal["agent", "sandbox", "container"], source),
         )
     raise CommandError(f"未知命令：{parts[0]}。发送 /help 查看帮助。")

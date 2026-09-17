@@ -1,4 +1,4 @@
-"""Execute GPU commands inside the project-scoped bubblewrap sandbox."""
+"""Execute project commands inside the project-scoped bubblewrap sandbox."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 import queue
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -17,12 +18,12 @@ from typing import Callable
 from ...core.config import ProjectConfig
 
 
-class GpuRunnerError(RuntimeError):
+class SandboxRunnerError(RuntimeError):
     pass
 
 
 @dataclass(frozen=True)
-class GpuRunResult:
+class SandboxRunResult:
     exit_code: int
     duration_seconds: float
     tail: str
@@ -36,18 +37,18 @@ PidCallback = Callable[[int], None]
 
 def resolve_project_cwd(project_path: Path, relative_cwd: str) -> Path:
     if not isinstance(relative_cwd, str) or not relative_cwd.strip():
-        raise GpuRunnerError("cwd must be a non-empty project-relative path")
+        raise SandboxRunnerError("cwd must be a non-empty project-relative path")
     requested = Path(relative_cwd)
     if requested.is_absolute():
-        raise GpuRunnerError("cwd must be relative to the configured project")
+        raise SandboxRunnerError("cwd must be relative to the configured project")
     project_root = project_path.resolve()
     candidate = (project_root / requested).resolve()
     try:
         candidate.relative_to(project_root)
     except ValueError as exc:
-        raise GpuRunnerError("cwd escapes the configured project") from exc
+        raise SandboxRunnerError("cwd escapes the configured project") from exc
     if not candidate.is_dir():
-        raise GpuRunnerError(f"cwd is not a directory: {relative_cwd}")
+        raise SandboxRunnerError(f"cwd is not a directory: {relative_cwd}")
     return candidate
 
 
@@ -86,26 +87,27 @@ def build_bwrap_command(
     *,
     bwrap_path: str | None = None,
     uv_path: str | None = None,
-    require_gpu_device: bool = True,
+    require_gpu_device: bool | None = None,
 ) -> list[str]:
-    gpu = project.gpu
-    if gpu is None or not gpu.enabled:
-        raise GpuRunnerError(f"GPU runner is not enabled for project {project.alias}")
+    sandbox = project.sandbox
+    if sandbox is None or not sandbox.enabled:
+        raise SandboxRunnerError(f"sandbox is not enabled for project {project.alias}")
+    gpu_enabled = sandbox.gpu if require_gpu_device is None else require_gpu_device
     if not argv or not all(isinstance(item, str) and item for item in argv):
-        raise GpuRunnerError("argv must be a non-empty array of non-empty strings")
+        raise SandboxRunnerError("argv must be a non-empty array of non-empty strings")
     if sum(len(item) for item in argv) > 64 * 1024:
-        raise GpuRunnerError("argv is too large")
+        raise SandboxRunnerError("argv is too large")
 
     working_directory = resolve_project_cwd(project.path, relative_cwd)
     executable = bwrap_path or shutil.which("bwrap")
     if not executable:
-        raise GpuRunnerError("bubblewrap is not installed")
+        raise SandboxRunnerError("bubblewrap is not installed")
     dxg = Path("/dev/dxg")
-    if require_gpu_device and not dxg.exists():
-        raise GpuRunnerError("/dev/dxg is not available; WSL GPU access is not enabled")
+    if gpu_enabled and not dxg.exists():
+        raise SandboxRunnerError("/dev/dxg is not available; WSL GPU access is not enabled")
     wsl_lib = Path("/usr/lib/wsl/lib")
-    if require_gpu_device and not wsl_lib.is_dir():
-        raise GpuRunnerError("/usr/lib/wsl/lib is not available")
+    if gpu_enabled and not wsl_lib.is_dir():
+        raise SandboxRunnerError("/usr/lib/wsl/lib is not available")
 
     command = [
         executable,
@@ -114,7 +116,7 @@ def build_bwrap_command(
         "--unshare-ipc",
         "--unshare-uts",
     ]
-    if not gpu.network:
+    if not sandbox.network:
         command.append("--unshare-net")
     command.extend(
         [
@@ -149,15 +151,18 @@ def build_bwrap_command(
         Path("/etc/nsswitch.conf"),
         Path("/etc/localtime"),
         Path("/etc/ssl/certs"),
+        # Debian-style alternatives back commands such as awk, cc and vi, so the
+        # symlink farm must be visible for the toolchain to resolve.
+        Path("/etc/alternatives"),
     ):
         _append_readonly_if_present(command, created, source)
-    if gpu.network:
+    if sandbox.network:
         for source in (Path("/etc/hosts"), Path("/etc/resolv.conf")):
             _append_readonly_if_present(command, created, source)
 
     command.extend(["--proc", "/proc", "--dev", "/dev"])
     created.update({Path("/proc"), Path("/dev")})
-    if require_gpu_device:
+    if gpu_enabled:
         command.extend(["--dev-bind", str(dxg), str(dxg)])
     if Path("/sys").is_dir():
         command.extend(["--ro-bind", "/sys", "/sys"])
@@ -175,11 +180,46 @@ def build_bwrap_command(
     if resolved_uv is None:
         found_uv = shutil.which("uv")
         resolved_uv = Path(found_uv).resolve() if found_uv else None
-    path_entries = ["/usr/lib/wsl/lib", "/usr/local/bin", "/usr/bin", "/bin"]
+    path_entries = ["/usr/local/bin", "/usr/bin", "/bin"]
+    if gpu_enabled:
+        path_entries.insert(0, "/usr/lib/wsl/lib")
     if resolved_uv and resolved_uv.is_file() and not resolved_uv.is_relative_to(project_root):
         _append_dir(command, created, resolved_uv.parent)
         command.extend(["--ro-bind", str(resolved_uv), str(resolved_uv)])
         path_entries.insert(0, str(resolved_uv.parent))
+
+    # Only explicit identity values and the agent socket cross this boundary.
+    # Never mount ~/.ssh, private keys, or the host Git configuration.
+    for suffix, value in (("NAME", sandbox.git_user_name), ("EMAIL", sandbox.git_user_email)):
+        if value is not None:
+            for role in ("AUTHOR", "COMMITTER"):
+                command.extend(["--setenv", f"GIT_{role}_{suffix}", value])
+    if sandbox.ssh_agent_socket is not None:
+        try:
+            socket_path = sandbox.ssh_agent_socket.resolve(strict=True)
+            socket_stat = socket_path.stat()
+            if not stat.S_ISSOCK(socket_stat.st_mode) or socket_stat.st_uid != os.getuid():
+                raise SandboxRunnerError(
+                    "sandbox_ssh_agent_socket must be a Unix socket owned by the service user"
+                )
+            if sandbox.ssh_known_hosts is None:
+                raise SandboxRunnerError(
+                    "sandbox_ssh_known_hosts is required for SSH agent forwarding"
+                )
+            hosts_path = sandbox.ssh_known_hosts.resolve(strict=True)
+            if not hosts_path.is_file():
+                raise SandboxRunnerError("sandbox_ssh_known_hosts must be a regular file")
+        except OSError as exc:
+            raise SandboxRunnerError("configured SSH socket or known_hosts is unavailable; check the service user's SSH agent") from exc
+        command.extend([
+            "--ro-bind", str(socket_path), "/tmp/agent-message-ssh-agent",
+            "--ro-bind", str(hosts_path), "/tmp/agent-message-known-hosts",
+            "--setenv", "SSH_AUTH_SOCK", "/tmp/agent-message-ssh-agent",
+            "--setenv", "GIT_SSH_COMMAND",
+            "ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=yes "
+            "-o UserKnownHostsFile=/tmp/agent-message-known-hosts "
+            "-o GlobalKnownHostsFile=/dev/null -o IdentityAgent=/tmp/agent-message-ssh-agent",
+        ])
 
     command.extend(
         [
@@ -204,9 +244,7 @@ def build_bwrap_command(
             "--setenv",
             "PATH",
             ":".join(path_entries),
-            "--setenv",
-            "LD_LIBRARY_PATH",
-            "/usr/lib/wsl/lib",
+            *(["--setenv", "LD_LIBRARY_PATH", "/usr/lib/wsl/lib"] if gpu_enabled else []),
             "--chdir",
             str(working_directory),
             "--",
@@ -233,11 +271,11 @@ def run_bubblewrap(
     cancel_event: threading.Event | None = None,
     bwrap_path: str | None = None,
     uv_path: str | None = None,
-    require_gpu_device: bool = True,
-) -> GpuRunResult:
-    gpu = project.gpu
-    if gpu is None or not gpu.enabled:
-        raise GpuRunnerError(f"GPU runner is not enabled for project {project.alias}")
+    require_gpu_device: bool | None = None,
+) -> SandboxRunResult:
+    sandbox = project.sandbox
+    if sandbox is None or not sandbox.enabled:
+        raise SandboxRunnerError(f"sandbox is not enabled for project {project.alias}")
     command = build_bwrap_command(
         project,
         argv,
@@ -280,7 +318,9 @@ def run_bubblewrap(
             finally:
                 chunks.put(None)
 
-        reader = threading.Thread(target=read_output, name="agent-message-gpu-log", daemon=True)
+        reader = threading.Thread(
+            target=read_output, name="agent-message-sandbox-log", daemon=True
+        )
         reader.start()
         stream_done = False
         with os.fdopen(fd, "wb") as log:
@@ -310,7 +350,9 @@ def run_bubblewrap(
                         tail_lines.append(raw.decode("utf-8", errors="replace").rstrip("\r"))
 
                 elapsed = time.monotonic() - started
-                if process.poll() is None and (cancel.is_set() or elapsed >= gpu.timeout_seconds):
+                if process.poll() is None and (
+                    cancel.is_set() or elapsed >= sandbox.timeout_seconds
+                ):
                     cancelled = cancel.is_set()
                     timed_out = not cancelled
                     if termination_started is None:
@@ -327,7 +369,7 @@ def run_bubblewrap(
     except OSError as exc:
         if fd >= 0:
             os.close(fd)
-        return GpuRunResult(
+        return SandboxRunResult(
             127,
             time.monotonic() - started,
             "\n".join(tail_lines),
@@ -336,12 +378,12 @@ def run_bubblewrap(
 
     error: str | None = None
     if timed_out:
-        error = f"GPU command timed out after {gpu.timeout_seconds} seconds"
+        error = f"sandbox command timed out after {sandbox.timeout_seconds} seconds"
     elif cancelled:
-        error = "GPU command was cancelled"
+        error = "sandbox command was cancelled"
     elif exit_code != 0:
-        error = f"GPU command exited with code {exit_code}"
-    return GpuRunResult(
+        error = f"sandbox command exited with code {exit_code}"
+    return SandboxRunResult(
         exit_code=exit_code,
         duration_seconds=time.monotonic() - started,
         tail="\n".join(tail_lines)[-20000:],

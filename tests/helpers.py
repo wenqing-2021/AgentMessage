@@ -9,7 +9,8 @@ from agent_message.core.models import InboundMessage
 def make_config(
     root: Path,
     projects: tuple[str, ...] = ("alpha",),
-    gpu_projects: tuple[str, ...] = (),
+    sandbox_projects: tuple[str, ...] = (),
+    sandbox_gpu_projects: tuple[str, ...] = (),
     container_projects: tuple[str, ...] = (),
     qoder_only_projects: tuple[str, ...] = (),
 ) -> AppConfig:
@@ -45,12 +46,13 @@ def make_config(
                 "",
             ]
         )
-        if name in gpu_projects:
+        if name in sandbox_projects or name in sandbox_gpu_projects:
             entries.extend(
                 [
-                    "gpu_enabled = true",
-                    "gpu_network = false",
-                    "gpu_timeout_seconds = 3600",
+                    "sandbox_enabled = true",
+                    "sandbox_gpu = " + ("true" if name in sandbox_gpu_projects else "false"),
+                    "sandbox_network = false",
+                    "sandbox_timeout_seconds = 3600",
                     "",
                 ]
             )

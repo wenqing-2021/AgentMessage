@@ -17,10 +17,10 @@ from .base import (
 from ..core.config import AppConfig
 from ..core.models import AgentKind, AgentResult, ClaimedRun, Task
 from ..runtimes.container.policy import CONTAINER_INSTRUCTIONS, CONTAINER_TURN_PREFIX
-from ..runtimes.gpu.policy import GPU_INSTRUCTIONS, GPU_TURN_PREFIX
+from ..runtimes.sandbox.policy import sandbox_instructions, sandbox_turn_prefix
 
 
-_GPU_MCP_SERVER_ID = "agent_message_bwrap_gpu"
+_SANDBOX_MCP_SERVER_ID = "agent_message_sandbox"
 _CONTAINER_MCP_SERVER_ID = "agent_message_container"
 
 
@@ -32,7 +32,7 @@ def _toml_string_array(values: list[str]) -> str:
     return "[" + ",".join(_toml_string(value) for value in values) + "]"
 
 
-def gpu_mcp_config_args(
+def sandbox_mcp_config_args(
     config: AppConfig,
     *,
     task_id: str,
@@ -40,11 +40,11 @@ def gpu_mcp_config_args(
     run_id: int | None,
 ) -> list[str]:
     project = config.projects[project_alias]
-    if project.gpu is None or not project.gpu.enabled:
+    if project.sandbox is None or not project.sandbox.enabled:
         return []
     server_args = [
         "-m",
-        "agent_message.runtimes.gpu.mcp",
+        "agent_message.runtimes.sandbox.mcp",
         "--config",
         str(config.config_path),
         "--task-id",
@@ -54,16 +54,16 @@ def gpu_mcp_config_args(
         server_args.extend(["--run-id", str(run_id)])
     root = config.config_path.parent.parent
     settings = {
-        "developer_instructions": _toml_string(GPU_INSTRUCTIONS),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.command": _toml_string(sys.executable),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.args": _toml_string_array(server_args),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.cwd": _toml_string(str(root)),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.required": "true",
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.enabled_tools": _toml_string_array(["gpu_run"]),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.tool_timeout_sec": str(
-            project.gpu.timeout_seconds + 30
+        "developer_instructions": _toml_string(sandbox_instructions(project.sandbox.gpu)),
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.command": _toml_string(sys.executable),
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.args": _toml_string_array(server_args),
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.cwd": _toml_string(str(root)),
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.required": "true",
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.enabled_tools": _toml_string_array(["sandbox_run"]),
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.tool_timeout_sec": str(
+            project.sandbox.timeout_seconds + 30
         ),
-        f"mcp_servers.{_GPU_MCP_SERVER_ID}.default_tools_approval_mode": _toml_string(
+        f"mcp_servers.{_SANDBOX_MCP_SERVER_ID}.default_tools_approval_mode": _toml_string(
             "approve"
         ),
     }
@@ -198,15 +198,15 @@ class CodexAdapter(AgentAdapter):
                 ),
                 CONTAINER_TURN_PREFIX,
             )
-        if project.gpu is not None and project.gpu.enabled:
+        if project.sandbox is not None and project.sandbox.enabled:
             return (
-                gpu_mcp_config_args(
+                sandbox_mcp_config_args(
                     self.app_config,
                     task_id=task_id,
                     project_alias=project_alias,
                     run_id=run_id,
                 ),
-                GPU_TURN_PREFIX,
+                sandbox_turn_prefix(project.sandbox.gpu),
             )
         return [], ""
 
@@ -227,6 +227,8 @@ class CodexAdapter(AgentAdapter):
             "-c", "sandbox_workspace_write.network_access="
             + ("true" if self.tool_network_enabled else "false"),
             *runtime_config,
+            *(["-c", f"model_reasoning_effort={_toml_string(run.reasoning_effort)}"]
+              if run.reasoning_effort else []),
             "app-server",
         ]
         return await execute_compaction(run, command, self.environment(), on_pid, on_progress)
@@ -237,12 +239,19 @@ class CodexAdapter(AgentAdapter):
         )
         prompt = prompt_prefix + run.prompt
         model_args = ["-m", run.model] if run.model else []
+        # Codex replaces parent -c overrides when exec/resume has its own -c.
+        # Keep every override together so effort cannot discard MCP or sandbox policy.
+        reasoning_args = (
+            ["-c", f"model_reasoning_effort={_toml_string(run.reasoning_effort)}"]
+            if run.reasoning_effort else []
+        )
         common = [
             self.executable,
             "-c",
             "sandbox_workspace_write.network_access="
             + ("true" if self.tool_network_enabled else "false"),
             *runtime_config,
+            *reasoning_args,
             "exec",
         ]
         output = ["--json", "--output-last-message", str(last_message_path)]

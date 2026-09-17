@@ -23,7 +23,11 @@ from .runtimes.container.runner import (
     inspect_container_target,
     run_container,
 )
-from .runtimes.gpu.runner import GpuRunnerError, build_bwrap_command, run_bubblewrap
+from .runtimes.sandbox.runner import (
+    SandboxRunnerError,
+    build_bwrap_command,
+    run_bubblewrap,
+)
 
 
 def _config_argument(parser: argparse.ArgumentParser) -> None:
@@ -40,9 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = subcommands.add_parser("doctor", help="check configuration and available agent CLIs")
     _config_argument(doctor)
     doctor.add_argument(
+        "--sandbox",
         "--gpu",
+        dest="sandbox_project",
         metavar="PROJECT_ALIAS",
-        help="run a real bubblewrap/JAX GPU probe for one GPU-enabled project",
+        help="run a real bubblewrap probe for one sandbox-enabled project",
     )
     doctor.add_argument(
         "--container",
@@ -100,21 +106,22 @@ def _qoder_login_status() -> bool | None:
     return logged_in if isinstance(logged_in, bool) else None
 
 
-def _gpu_doctor(config: AppConfig, project_alias: str) -> int:
+def _sandbox_doctor(config: AppConfig, project_alias: str) -> int:
     project = config.projects.get(project_alias)
     if project is None:
         aliases = ", ".join(sorted(config.projects))
-        print(f"GPU 检查失败：未知项目 {project_alias}；可用项目：{aliases}", file=sys.stderr)
+        print(f"沙箱检查失败：未知项目 {project_alias}；可用项目：{aliases}", file=sys.stderr)
         return 2
-    if project.gpu is None or not project.gpu.enabled:
+    sandbox = project.sandbox
+    if sandbox is None or not sandbox.enabled:
         print(
-            f"GPU 检查失败：项目 {project_alias} 未设置 gpu_enabled = true。",
+            f"沙箱检查失败：项目 {project_alias} 未设置 sandbox_enabled = true。",
             file=sys.stderr,
         )
         return 2
     python_path = project.path / ".venv" / "bin" / "python"
     if not python_path.is_file():
-        print(f"GPU 检查失败：找不到项目 Python：{python_path}", file=sys.stderr)
+        print(f"沙箱检查失败：找不到项目 Python：{python_path}", file=sys.stderr)
         return 2
     sensitive_paths = [
         str(config.config_path),
@@ -130,19 +137,24 @@ def _gpu_doctor(config: AppConfig, project_alias: str) -> int:
         ],
     ]
     sensitive_literal = json.dumps(sensitive_paths)
-    probe = (
-        "import json, os, jax; "
+    isolation_probe = (
         f"sensitive={sensitive_literal}; "
-        "print(json.dumps({'backend': jax.default_backend(), "
-        "'devices': [str(item) for item in jax.devices()], "
-        "'project_visible': os.path.isdir(os.getcwd()), "
+        "print(json.dumps({'project_visible': os.path.isdir(os.getcwd()), "
         "'sandbox_home': os.environ.get('HOME'), "
         "'sensitive_visible': [item for item in sensitive if os.path.exists(item)], "
         "'feishu_env_visible': any(key.startswith('AGENT_MESSAGE_FEISHU_') "
         "for key in os.environ)}))"
     )
-    with tempfile.TemporaryDirectory(prefix="agent-message-gpu-doctor-") as temp:
-        log_path = Path(temp) / "gpu-doctor.log"
+    if sandbox.gpu:
+        probe = (
+            "import json, os, jax; " + isolation_probe + "; "
+            "print(json.dumps({'backend': jax.default_backend(), "
+            "'devices': [str(item) for item in jax.devices()]}))"
+        )
+    else:
+        probe = "import json, os; " + isolation_probe
+    with tempfile.TemporaryDirectory(prefix="agent-message-sandbox-doctor-") as temp:
+        log_path = Path(temp) / "sandbox-doctor.log"
         try:
             result = run_bubblewrap(
                 project,
@@ -150,46 +162,47 @@ def _gpu_doctor(config: AppConfig, project_alias: str) -> int:
                 ".",
                 log_path,
             )
-        except GpuRunnerError as exc:
-            print(f"GPU 检查失败：{exc}", file=sys.stderr)
+        except SandboxRunnerError as exc:
+            print(f"沙箱检查失败：{exc}", file=sys.stderr)
             return 2
-    payload = None
+    payload: dict[str, object] | None = None
     for line in reversed(result.tail.splitlines()):
         try:
             candidate = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict) and "backend" in candidate:
+        if isinstance(candidate, dict) and "sandbox_home" in candidate:
             payload = candidate
             break
     if result.exit_code != 0 or payload is None:
-        print(f"GPU 检查失败：{result.error or '没有收到 JAX 设备结果'}", file=sys.stderr)
+        print(f"沙箱检查失败：{result.error or '没有收到探针结果'}", file=sys.stderr)
         if result.tail:
             print(result.tail, file=sys.stderr)
         return 2
-    devices = payload.get("devices")
-    backend = payload.get("backend")
-    gpu_ok = backend == "gpu" and isinstance(devices, list) and any(
-        "cuda" in str(item).lower() for item in devices
-    )
     isolation_ok = (
         payload.get("project_visible") is True
         and payload.get("sandbox_home") == "/tmp/home"
         and payload.get("sensitive_visible") == []
         and payload.get("feishu_env_visible") is False
     )
-    print(f"GPU JAX backend：{backend}")
-    print(f"GPU JAX devices：{devices}")
-    if not gpu_ok:
-        print("GPU 检查失败：JAX 未识别 cuda 设备。", file=sys.stderr)
-        return 2
+    if sandbox.gpu:
+        devices = payload.get("devices")
+        backend = payload.get("backend")
+        gpu_ok = backend == "gpu" and isinstance(devices, list) and any(
+            "cuda" in str(item).lower() for item in devices
+        )
+        print(f"GPU JAX backend：{backend}")
+        print(f"GPU JAX devices：{devices}")
+        if not gpu_ok:
+            print("沙箱检查失败：JAX 未识别 cuda 设备。", file=sys.stderr)
+            return 2
     print(
-        "GPU 敏感路径与环境隔离："
+        "沙箱敏感路径与环境隔离："
         + ("通过" if isolation_ok else f"失败（{payload}）")
     )
     if not isolation_ok:
         return 2
-    print("GPU bubblewrap/JAX 契约：通过")
+    print("bubblewrap 沙箱契约：通过")
     return 0
 
 
@@ -267,7 +280,6 @@ def _bwrap_capability(project: ProjectConfig) -> tuple[bool, str]:
         command = build_bwrap_command(
             project,
             ["/usr/bin/true"],
-            require_gpu_device=False,
         )
         completed = subprocess.run(
             command,
@@ -276,7 +288,7 @@ def _bwrap_capability(project: ProjectConfig) -> tuple[bool, str]:
             timeout=10,
             check=False,
         )
-    except (GpuRunnerError, OSError, subprocess.TimeoutExpired) as exc:
+    except (SandboxRunnerError, OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if completed.returncode == 0:
         return True, "通过"
@@ -286,12 +298,12 @@ def _bwrap_capability(project: ProjectConfig) -> tuple[bool, str]:
 
 def command_doctor(
     config_path: str,
-    gpu_project: str | None = None,
+    sandbox_project: str | None = None,
     container_project: str | None = None,
 ) -> int:
     config = load_config(config_path)
-    if gpu_project and container_project:
-        print("GPU 检查与容器检查一次只能选择一个。", file=sys.stderr)
+    if sandbox_project and container_project:
+        print("沙箱检查与容器检查一次只能选择一个。", file=sys.stderr)
         return 2
     print(f"配置：{config.config_path}")
     print(f"状态目录：{config.service.state_dir}")
@@ -299,11 +311,13 @@ def command_doctor(
     print("项目：")
     for project in config.projects.values():
         agents = ", ".join(agent.value for agent in sorted(project.allowed_agents, key=str))
-        gpu = project.gpu
-        gpu_text = (
-            f"，GPU bubblewrap 已启用（{'联网' if gpu.network else '无网络'}，"
-            f"超时 {gpu.timeout_seconds}s）"
-            if gpu and gpu.enabled
+        sandbox = project.sandbox
+        sandbox_text = (
+            f"，bubblewrap 沙箱已启用（"
+            f"{'GPU 透传' if sandbox.gpu else '无 GPU'}，"
+            f"{'联网' if sandbox.network else '无网络'}，"
+            f"超时 {sandbox.timeout_seconds}s）"
+            if sandbox and sandbox.enabled
             else ""
         )
         container = project.container
@@ -315,8 +329,8 @@ def command_doctor(
             if container
             else ""
         )
-        print(f"  {project.alias}: {project.path} ({agents}){gpu_text}{container_text}")
-        if gpu and gpu.enabled:
+        print(f"  {project.alias}: {project.path} ({agents}){sandbox_text}{container_text}")
+        if sandbox and sandbox.enabled:
             isolation_ok, isolation_detail = _bwrap_capability(project)
             print(
                 "    Bubblewrap 隔离能力："
@@ -402,8 +416,8 @@ def command_doctor(
         "WSL CUDA 库："
         + ("可用" if Path("/usr/lib/wsl/lib").is_dir() else "不可用（缺少 /usr/lib/wsl/lib）")
     )
-    if gpu_project:
-        return _gpu_doctor(config, gpu_project)
+    if sandbox_project:
+        return _sandbox_doctor(config, sandbox_project)
     if container_project:
         return _container_doctor(config, container_project)
     return 0
@@ -508,7 +522,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "doctor":
-            raise SystemExit(command_doctor(args.config, args.gpu, args.container))
+            raise SystemExit(command_doctor(args.config, args.sandbox_project, args.container))
         if args.command == "tasks":
             raise SystemExit(command_tasks(args.config))
         if args.command == "authorize":

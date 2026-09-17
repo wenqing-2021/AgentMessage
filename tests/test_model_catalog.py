@@ -57,6 +57,23 @@ model = "{model}"
             self.assertEqual(found.slug, "deepseek/deepseek-v4-pro")
             self.assertIsNone(find_codex_model("missing", config))
 
+    def test_reasoning_metadata_handles_missing_empty_and_malformed_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            catalog = root / "catalog.json"
+            catalog.write_text(json.dumps({"models": [
+                {"slug": "first", "supported_reasoning_levels": [
+                    {"effort": "low"}, {"effort": "ultra"}, {"effort": "low"},
+                    {"effort": []}, None, {"effort": "invalid"}], "default_reasoning_level": "low"},
+                {"slug": "second", "supported_reasoning_levels": []},
+                {"slug": "third"},
+            ]}))
+            models = list_codex_models(self._write_config(root, catalog))
+            self.assertEqual(models[0].reasoning_levels, ("low", "ultra"))
+            self.assertEqual(models[0].default_reasoning_level, "low")
+            self.assertEqual(models[1].reasoning_levels, ())
+            self.assertIsNone(models[2].reasoning_levels)
+
     def test_missing_config_returns_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = Path(temp) / "nope.toml"

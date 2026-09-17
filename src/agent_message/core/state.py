@@ -16,7 +16,7 @@ from .models import (
     AgentKind,
     ClaimedRun,
     ContainerJob,
-    GpuJob,
+    SandboxJob,
     MessageStatus,
     OutboxMessage,
     Task,
@@ -102,7 +102,7 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_runs_task_status ON runs(task_id, status);
 
-                CREATE TABLE IF NOT EXISTS gpu_jobs (
+                CREATE TABLE IF NOT EXISTS sandbox_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
                     run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
@@ -117,8 +117,8 @@ class StateStore:
                     exit_code INTEGER,
                     error TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_gpu_jobs_task_status
-                    ON gpu_jobs(task_id, status, id);
+                CREATE INDEX IF NOT EXISTS idx_sandbox_jobs_task_status
+                    ON sandbox_jobs(task_id, status, id);
 
                 CREATE TABLE IF NOT EXISTS container_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +182,27 @@ class StateStore:
             self._add_column_if_missing("task_messages", "operation", "TEXT NOT NULL DEFAULT 'message'")
             self._add_column_if_missing("tasks", "origin", "TEXT NOT NULL DEFAULT 'task'")
             self._add_column_if_missing("chat_context", "default_chat_task_id", "TEXT")
+            self._migrate_legacy_sandbox_jobs()
+
+    def _migrate_legacy_sandbox_jobs(self) -> None:
+        """Move jobs recorded before the GPU runtime became the sandbox runtime.
+
+        The table was renamed from `gpu_jobs` to `sandbox_jobs`; copy any existing rows so an
+        upgraded install keeps its audit trail. The guard makes this repeatable.
+        """
+        legacy = self._connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gpu_jobs'"
+        ).fetchone()
+        if legacy is None:
+            return
+        columns = (
+            "id, task_id, run_id, status, pid, command_summary, argv_json, cwd, "
+            "log_path, started_at, finished_at, exit_code, error"
+        )
+        self._connection.execute(
+            f"INSERT OR IGNORE INTO sandbox_jobs({columns}) SELECT {columns} FROM gpu_jobs"
+        )
+        self._connection.execute("DROP TABLE gpu_jobs")
 
     def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
         columns = {
@@ -229,19 +250,24 @@ class StateStore:
             return str(row["value"]) if row is not None else None
 
     def set_setting(self, key: str, value: str | None) -> None:
+        self.set_settings({key: value})
+
+    def set_settings(self, values: dict[str, str | None]) -> None:
+        """Apply related settings atomically with respect to run claiming."""
         timestamp = _now()
         with self._lock, self._connection:
-            if value is None:
-                self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
-                return
-            self._connection.execute(
-                """
-                INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-                    updated_at=excluded.updated_at
-                """,
-                (key, value, timestamp),
-            )
+            for key, value in values.items():
+                if value is None:
+                    self._connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+                else:
+                    self._connection.execute(
+                        """
+                        INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                            updated_at=excluded.updated_at
+                        """,
+                        (key, value, timestamp),
+                    )
 
     def register_inbound(
         self, event_id: str, message_id: str, chat_id: str, sender_open_id: str, text: str
@@ -515,6 +541,7 @@ class StateStore:
                 chat_id=row["chat_id"],
                 log_path=log_path,
                 model=model,
+                reasoning_effort=self.get_setting("codex_reasoning_effort"),
                 operation=row["operation"],
             )
 
@@ -670,8 +697,8 @@ class StateStore:
         return [self._row_to_container_job(row) for row in rows]
 
     @staticmethod
-    def _row_to_gpu_job(row: sqlite3.Row) -> GpuJob:
-        return GpuJob(
+    def _row_to_sandbox_job(row: sqlite3.Row) -> SandboxJob:
+        return SandboxJob(
             id=int(row["id"]),
             task_id=str(row["task_id"]),
             run_id=int(row["run_id"]) if row["run_id"] is not None else None,
@@ -686,14 +713,14 @@ class StateStore:
             error=str(row["error"]) if row["error"] is not None else None,
         )
 
-    def create_gpu_job(
+    def create_sandbox_job(
         self,
         *,
         task_id: str,
         run_id: int | None,
         argv: list[str],
         cwd: str,
-    ) -> GpuJob:
+    ) -> SandboxJob:
         timestamp = _now()
         summary = shlex.join(argv)[:1000]
         # Keep the legacy column non-sensitive: the requested audit record is the
@@ -713,40 +740,40 @@ class StateStore:
                     raise ValueError(f"run {run_id} does not belong to task {task_id}")
             cursor = self._connection.execute(
                 """
-                INSERT INTO gpu_jobs(
+                INSERT INTO sandbox_jobs(
                     task_id, run_id, status, command_summary, argv_json, cwd, log_path, started_at
                 ) VALUES (?, ?, 'running', ?, ?, ?, '', ?)
                 """,
                 (task_id, run_id, summary, argv_json, cwd, timestamp),
             )
             job_id = int(cursor.lastrowid)
-            log_path = self.config.service.log_dir / task_id / f"gpu-job-{job_id}.log"
+            log_path = self.config.service.log_dir / task_id / f"sandbox-job-{job_id}.log"
             self._connection.execute(
-                "UPDATE gpu_jobs SET log_path = ? WHERE id = ?", (str(log_path), job_id)
+                "UPDATE sandbox_jobs SET log_path = ? WHERE id = ?", (str(log_path), job_id)
             )
             row = self._connection.execute(
-                "SELECT * FROM gpu_jobs WHERE id = ?", (job_id,)
+                "SELECT * FROM sandbox_jobs WHERE id = ?", (job_id,)
             ).fetchone()
         assert row is not None
-        return self._row_to_gpu_job(row)
+        return self._row_to_sandbox_job(row)
 
-    def set_gpu_job_pid(self, job_id: int, pid: int) -> None:
+    def set_sandbox_job_pid(self, job_id: int, pid: int) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                "UPDATE gpu_jobs SET pid = ? WHERE id = ? AND status = 'running'",
+                "UPDATE sandbox_jobs SET pid = ? WHERE id = ? AND status = 'running'",
                 (pid, job_id),
             )
 
-    def finish_gpu_job(
+    def finish_sandbox_job(
         self, job_id: int, *, exit_code: int, error: str | None, cancelled: bool = False
-    ) -> GpuJob:
+    ) -> SandboxJob:
         timestamp = _now()
         with self._lock, self._connection:
             previous = self._connection.execute(
-                "SELECT status FROM gpu_jobs WHERE id = ?", (job_id,)
+                "SELECT status FROM sandbox_jobs WHERE id = ?", (job_id,)
             ).fetchone()
             if previous is None:
-                raise ValueError(f"unknown gpu job: {job_id}")
+                raise ValueError(f"unknown sandbox job: {job_id}")
             was_stopping = str(previous["status"]) == "stopping"
             if cancelled or was_stopping:
                 status = "stopped"
@@ -756,33 +783,33 @@ class StateStore:
                 status = "failed"
             self._connection.execute(
                 """
-                UPDATE gpu_jobs SET status = ?, finished_at = ?, exit_code = ?, error = ?
+                UPDATE sandbox_jobs SET status = ?, finished_at = ?, exit_code = ?, error = ?
                 WHERE id = ?
                 """,
                 (status, timestamp, exit_code, error[:1000] if error else None, job_id),
             )
             row = self._connection.execute(
-                "SELECT * FROM gpu_jobs WHERE id = ?", (job_id,)
+                "SELECT * FROM sandbox_jobs WHERE id = ?", (job_id,)
             ).fetchone()
         assert row is not None
-        return self._row_to_gpu_job(row)
+        return self._row_to_sandbox_job(row)
 
-    def latest_gpu_job(self, task_id: str) -> GpuJob | None:
+    def latest_sandbox_job(self, task_id: str) -> SandboxJob | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT * FROM gpu_jobs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM sandbox_jobs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
-        return self._row_to_gpu_job(row) if row else None
+        return self._row_to_sandbox_job(row) if row else None
 
-    def mark_gpu_jobs_stopping(self, task_id: str) -> list[int]:
+    def mark_sandbox_jobs_stopping(self, task_id: str) -> list[int]:
         with self._lock, self._connection:
             rows = self._connection.execute(
-                "SELECT pid FROM gpu_jobs WHERE task_id = ? AND status = 'running' AND pid IS NOT NULL",
+                "SELECT pid FROM sandbox_jobs WHERE task_id = ? AND status = 'running' AND pid IS NOT NULL",
                 (task_id,),
             ).fetchall()
             self._connection.execute(
-                "UPDATE gpu_jobs SET status = 'stopping' WHERE task_id = ? AND status = 'running'",
+                "UPDATE sandbox_jobs SET status = 'stopping' WHERE task_id = ? AND status = 'running'",
                 (task_id,),
             )
         return [int(row["pid"]) for row in rows]
@@ -843,7 +870,7 @@ class StateStore:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                UPDATE gpu_jobs SET status = 'interrupted', finished_at = ?,
+                UPDATE sandbox_jobs SET status = 'interrupted', finished_at = ?,
                     error = COALESCE(error, 'bridge restarted')
                 WHERE status IN ('running', 'stopping')
                 """,
@@ -926,8 +953,8 @@ class StateStore:
             return []
         return self._tail_file(log_path, limit)
 
-    def tail_gpu_log(self, task_id: str, limit: int) -> list[str]:
-        job = self.latest_gpu_job(task_id)
+    def tail_sandbox_log(self, task_id: str, limit: int) -> list[str]:
+        job = self.latest_sandbox_job(task_id)
         if job is None or not job.log_path.is_file():
             return []
         return self._tail_file(job.log_path, limit)

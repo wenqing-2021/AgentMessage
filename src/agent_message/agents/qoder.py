@@ -11,11 +11,11 @@ from .base import AdapterError, AgentAdapter, ParsedAgentEvent
 from ..core.config import AppConfig
 from ..core.models import AgentKind, ClaimedRun, Task
 from ..runtimes.container.policy import CONTAINER_INSTRUCTIONS, CONTAINER_TURN_PREFIX
-from ..runtimes.gpu.policy import GPU_INSTRUCTIONS, GPU_TURN_PREFIX
+from ..runtimes.sandbox.policy import sandbox_instructions, sandbox_turn_prefix
 
 
-_GPU_MCP_SERVER_ID = "agent_message_bwrap_gpu"
-_GPU_MCP_TOOL = f"mcp__{_GPU_MCP_SERVER_ID}__gpu_run"
+_SANDBOX_MCP_SERVER_ID = "agent_message_sandbox"
+_SANDBOX_MCP_TOOL = f"mcp__{_SANDBOX_MCP_SERVER_ID}__sandbox_run"
 _CONTAINER_MCP_SERVER_ID = "agent_message_container"
 _CONTAINER_MCP_TOOL = f"mcp__{_CONTAINER_MCP_SERVER_ID}__container_run"
 _BASE_TOOLS = ("Read", "Grep", "Glob", "Edit", "Write")
@@ -68,13 +68,13 @@ class QoderAdapter(AgentAdapter):
                 CONTAINER_INSTRUCTIONS,
                 CONTAINER_TURN_PREFIX,
             )
-        if project.gpu is not None and project.gpu.enabled:
+        if project.sandbox is not None and project.sandbox.enabled:
             return _Runtime(
-                _GPU_MCP_SERVER_ID,
-                _GPU_MCP_TOOL,
-                "agent_message.runtimes.gpu.mcp",
-                GPU_INSTRUCTIONS,
-                GPU_TURN_PREFIX,
+                _SANDBOX_MCP_SERVER_ID,
+                _SANDBOX_MCP_TOOL,
+                "agent_message.runtimes.sandbox.mcp",
+                sandbox_instructions(project.sandbox.gpu),
+                sandbox_turn_prefix(project.sandbox.gpu),
             )
         return None
 
@@ -121,7 +121,7 @@ class QoderAdapter(AgentAdapter):
     ) -> tuple[list[str], _Runtime | None]:
         runtime = self._runtime(project_alias)
         tools = list(_BASE_TOOLS)
-        if runtime is None or runtime.server_id == _GPU_MCP_SERVER_ID:
+        if runtime is None or runtime.server_id == _SANDBOX_MCP_SERVER_ID:
             tools.append("Bash")
         if runtime is not None:
             tools.append(runtime.tool_name)
@@ -222,7 +222,7 @@ class QoderAdapter(AgentAdapter):
                     "Edit": "Qoder 正在修改项目文件。",
                     "Write": "Qoder 正在写入项目文件。",
                     "Bash": "Qoder 正在执行受限本地命令。",
-                    _GPU_MCP_TOOL: "Qoder 正在执行受控 GPU 命令。",
+                    _SANDBOX_MCP_TOOL: "Qoder 正在执行受控沙箱命令。",
                     _CONTAINER_MCP_TOOL: "Qoder 正在执行受控容器命令。",
                 }.get(name)
                 if progress:

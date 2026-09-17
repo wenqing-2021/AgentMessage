@@ -7,7 +7,7 @@ evolve independently without changing established imports.
 from __future__ import annotations
 
 from .base import AdapterError, AgentAdapter, ParsedAgentEvent
-from .codex import CodexAdapter, container_mcp_config_args, gpu_mcp_config_args
+from .codex import CodexAdapter, container_mcp_config_args, sandbox_mcp_config_args
 from .qoder import QoderAdapter
 from ..core.config import AppConfig
 from ..core.models import AgentKind
@@ -32,5 +32,5 @@ __all__ = [
     "QoderAdapter",
     "adapter_for",
     "container_mcp_config_args",
-    "gpu_mcp_config_args",
+    "sandbox_mcp_config_args",
 ]

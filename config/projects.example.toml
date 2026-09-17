@@ -7,9 +7,15 @@ state_dir = "var"
 log_dir = "var/logs"
 default_chat_project = "agent_message"
 # Set true only for trusted projects where Codex-generated tools may use the network.
-codex_tool_network = false
+codex_tool_network = true
 stop_grace_seconds = 10
 final_message_limit = 3500
+# Global commit identity shared by every bubblewrap sandbox project:
+# sandbox_git_user_name = "Alice"
+# sandbox_git_user_email = "alice@example.com"
+# Global dedicated SSH agent shared by every bubblewrap sandbox project; both absolute paths are required. No private keys are mounted.
+# sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh.sock"
+# sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
 
 [projects.agent_message]
 path = "/home/alice/workspace/agent_message"
@@ -17,10 +23,12 @@ default_agent = "codex"
 allowed_agents = ["codex", "qoder"]
 # Set default_agent = "qoder" for a long-lived default Qoder chat. A project may
 # also use allowed_agents = ["qoder"] when Codex is not installed.
-# Optional WSL GPU execution through AgentMessage's bubblewrap MCP:
-# gpu_enabled = true
-# gpu_network = true
-# gpu_timeout_seconds = 86400
+# Optional bubblewrap sandbox through AgentMessage's sandbox MCP. Project commands,
+# including Git writes, run through sandbox_run; add sandbox_gpu for CUDA/JAX work:
+# sandbox_enabled = true
+# sandbox_gpu = false
+# sandbox_network = true
+# sandbox_timeout_seconds = 86400
 
 # Existing Docker container execution. The host path must already be bind-mounted at
 # container_path in the named container; docker inspect verifies this mapping before each run.

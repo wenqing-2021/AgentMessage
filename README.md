@@ -1,10 +1,9 @@
 <p align="center">
-  <img src="assets/img/logo.png" width="100%" alt="AgentMessage：飞书机器人连接 WSL 中的 Codex/Qoder，并可选使用 Docker 或 GPU 运行时">
+  <img src="assets/img/logo.png" width="100%" alt="AgentMessage connects a Feishu bot to Codex or Qoder in WSL, with optional Docker and Bubblewrap sandbox runtimes">
 </p>
 
 <p align="center">
-  <a href="README.md"><img src="https://img.shields.io/badge/README-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2ea44f" alt="简体中文"></a>
-  <a href="README_EN.md"><img src="https://img.shields.io/badge/README-English-555555" alt="English"></a>
+  <a href="README.md">En</a> | <a href="README_CN.md">Cn</a>
 </p>
 
 <p align="center">
@@ -12,33 +11,43 @@
   <img src="https://img.shields.io/badge/package%20manager-uv-DE5FE9" alt="uv">
   <img src="https://img.shields.io/badge/code%20style-PEP%208-306998" alt="Code style: PEP 8">
   <img src="https://img.shields.io/badge/tests-unittest-6C8549" alt="Tests: unittest">
+  <img src="https://visitor-badge.laobi.icu/badge?page_id=wenqing-2021.AgentMessage&amp;left_color=gray&amp;right_color=blue" alt="Visitors">
   <img src="https://img.shields.io/badge/Docker-optional-2496ED?logo=docker&logoColor=white" alt="Docker optional">
   <img src="https://img.shields.io/badge/platform-WSL%20%7C%20Linux-FCC624?logo=linux&logoColor=black" alt="Platform: WSL and Linux">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT License"></a>
 </p>
 
-AgentMessage 通过飞书长连接，把机器人单聊消息交给 WSL/Linux 中的 Codex CLI 或 Qoder CLI，再将任务进度和结果发回飞书；不需要公网 IP、端口或回调 URL。
+AgentMessage uses a Feishu long connection to forward direct bot messages to Codex CLI or Qoder CLI on WSL/Linux, then sends task progress and results back to Feishu. It requires no public IP address, open port, or callback URL.
 
-## 先配置飞书
+## Features
 
-这一步独立于仓库，可以在安装 AgentMessage 前完成。进入[飞书开放平台开发者后台](https://open.feishu.cn/app)：
+- **Feishu remote coding:** send tasks and receive progress and results without a public IP or open port.
+- **Codex and Qoder:** choose an agent per project and resume the same session from your terminal.
+- **Persistent conversations:** queue tasks, track status and logs, and stop work from Feishu; different projects can run concurrently.
+- **Model controls:** switch Codex models and reasoning effort, and compact context without starting a new session.
+- **Bubblewrap sandbox and Docker:** give any project a controlled sandbox with writable Git metadata, and enable GPU passthrough per project.
+- **Access control:** authorize users and restrict work to registered projects.
 
-1. 创建企业自建应用并添加机器人能力。
-2. 开通 `im:message.p2p_msg:readonly` 和 `im:message:send_as_bot` 权限。
-3. 在事件订阅中选择“使用长连接接收事件”，添加 `im.message.receive_v1`。
-4. 创建并发布应用版本，将机器人可用范围限制为自己。
-5. 保存 App ID 和 App Secret；安装脚本稍后会在终端中询问，Secret 输入不会回显。
+## Configure Feishu
 
-## 一键安装
+Open the [Feishu Developer Console](https://open.feishu.cn/app):
 
-需要 curl、Ubuntu/WSL 或常见 systemd Linux，以及至少一个已安装的 Codex CLI 或 Qoder CLI。Agent CLI 登录仍使用各自的官方命令：
+1. Create an enterprise self-built app and add the bot capability.
+2. Grant `im:message.p2p_msg:readonly` and `im:message:send_as_bot`.
+3. Select long-connection event delivery and add `im.message.receive_v1`.
+4. Create and publish an app version, restricting the bot's availability to yourself.
+5. Keep the App ID and App Secret ready. The installer asks for them in the terminal and does not echo the Secret.
+
+## One-command Installation
+
+Use curl on Ubuntu/WSL or another common systemd Linux distribution, with at least one Codex CLI or Qoder CLI installed. Agent CLI authentication still uses its official command:
 
 ```bash
-codex login       # 使用 Codex 时
-qodercli login    # 使用 Qoder 时
+codex login       # when using Codex
+qodercli login    # when using Qoder
 ```
 
-从 HTTPS 下载安装脚本并运行：
+Download the installer over HTTPS and run it:
 
 ```bash
 curl -fsSLo /tmp/agent-message-install.sh \
@@ -46,33 +55,25 @@ curl -fsSLo /tmp/agent-message-install.sh \
 bash /tmp/agent-message-install.sh
 ```
 
-脚本默认安装到 `~/workspace/AgentMessage`，并自动完成：
+The installer sets up AgentMessage, collects Feishu credentials, and starts the background service. The default directory is `~/workspace/AgentMessage`. Rerun it to resume an interrupted installation.
 
-- 通过 HTTPS clone 或 fast-forward 更新项目。
-- 缺少时安装 Git、systemd 和 uv，并执行 `uv sync --frozen`。
-- 根据已安装的 Codex/Qoder 生成最小 `config/projects.toml`。
-- 在终端读取 App ID 和隐藏输入的 App Secret，写入仓库外的 `~/.config/agent-message/feishu.env`。
-- 安装并启动 `agent-message.service` systemd 用户服务。
-
-安装进度保存在本地 Git 元数据中。若在凭证输入或 systemd 配置阶段退出，重新运行同一命令会直接从断点继续；已经输入的 App ID 不需要重复输入。
-
-自定义安装目录时使用：
+To use another install directory:
 
 ```bash
 bash /tmp/agent-message-install.sh --install-dir /absolute/path/AgentMessage
 ```
 
-如果 systemd 已安装但尚未在 WSL 中启用，脚本会暂停并给出 `/etc/wsl.conf` 和 `wsl --shutdown` 提示；重新打开 WSL 后再次运行即可继续。
+If systemd is installed but inactive in WSL, the installer pauses with the required `/etc/wsl.conf` and `wsl --shutdown` instructions. Reopen WSL and run it again to resume.
 
-## 项目配置
+## Project Configuration
 
-安装脚本会先把 AgentMessage 仓库本身注册为默认项目。添加自己的项目时编辑：
+The installer initially registers the AgentMessage repository itself as the default project. Add your own projects by editing:
 
 ```bash
 vim ~/workspace/AgentMessage/config/projects.toml
 ```
 
-最小项目配置：
+Minimal project configuration:
 
 ```toml
 [service]
@@ -87,17 +88,17 @@ default_agent = "qoder"
 allowed_agents = ["codex", "qoder"]
 ```
 
-- `path` 必须是本机存在的绝对路径，飞书消息不能提交任意路径。
-- `default_agent` 必须包含在 `allowed_agents` 中，支持 Codex-only、Qoder-only 或二者并存。
-- `codex_tool_network = true` 才会允许普通 Codex 工具联网；Qoder 普通 Bash 默认可以联网。
-- 完整字段见 [`config/projects.example.toml`](config/projects.example.toml)。
-- GPU/CUDA/JAX 隔离运行见 [GPU 与 Bubblewrap 指南](assets/docs/gpu-bubblewrap.md)。
+- `path` must be an existing absolute local path; Feishu messages cannot submit arbitrary paths.
+- `default_agent` must be present in `allowed_agents`; Codex-only, Qoder-only, and mixed projects are supported.
+- Ordinary Codex tools can use the network only when `codex_tool_network = true`; ordinary Qoder Bash commands can use the network by default.
+- See [`config/projects.example.toml`](config/projects.example.toml) for all common fields.
+- See [Bubblewrap sandbox](assets/docs/sandbox-bubblewrap.en.md) for isolated execution, Git writes, and optional GPU/CUDA/JAX access.
 
-修改配置后使用 README 最后的重启命令。
+Use the restart commands at the end of this README after changing the configuration.
 
-## 首次授权
+## First Authorization
 
-安装完成后，在飞书中给机器人发送 `/help`，再在终端查看并授权自己的 `open_id`：
+After installation, send `/help` to the bot in Feishu, then inspect and authorize your own `open_id`:
 
 ```bash
 cd ~/workspace/AgentMessage
@@ -105,52 +106,67 @@ uv run agent-message pending-senders
 uv run agent-message authorize ou_xxx
 ```
 
-再次发送 `/help`，收到回复即表示连接完成。只授权自己的账号。
+Send `/help` again. A bot response confirms the connection. Authorize only your own account.
 
-查看服务与日志：
+Inspect the service and logs with:
 
 ```bash
 systemctl --user status agent-message --no-pager
 journalctl --user -u agent-message -f
 ```
 
-## 飞书命令
+## Feishu Commands
 
-普通文本会继续当前任务；没有当前任务时，会使用默认项目的 `default_agent` 创建长期对话。
+Ordinary text continues the current task. When there is no current task, the default project's `default_agent` starts a long-lived conversation.
 
 ```text
-/new website <任务描述>
-/new website --agent qoder <任务描述>
+/new website <task description>
+/new website --agent qoder <task description>
 /chat
 /model
-/model <模型名称>
+/model <model name>
+/model 1
+/model next
+/model prev
+/model 1 high
+/model effort high
+/model effort default
 /compact
 /use a1b2c3d4
 /status
 /status a1b2c3d4
 /logs a1b2c3d4 50
-/logs a1b2c3d4 50 gpu
+/logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
 /stop a1b2c3d4
 /help
 ```
 
-发送 /model 查看 Codex 可用模型，发送 /model <模型名称> 切换模型：当前 session 的下一轮以及后续新任务都会使用新模型，保留会话上下文；正在执行的轮次不变。该设置为全局 Codex 默认模型，不影响 Qoder。
+`/model` lists available models and reasoning levels. Select by name or number, cycle with `next` / `prev`, or set effort with `/model 1 high` and `/model effort high`. Use `/model effort default` to reset effort. These global Codex settings persist across restarts and take effect on the next turn.
 
-发送 /compact 压缩当前 Codex session 的上下文：AgentMessage 通过 Codex app-server 的 `thread/compact/start` 执行原生压缩，保留同一个 session 与后续对话能力，完成后在飞书回复结果。若该任务正在执行，压缩请求会排在当前轮次之后；Qoder 任务暂不支持。/compact 只压缩，不产生新的对话内容。
+`/compact` compresses the current Codex conversation while preserving its session. If a turn is running, compaction waits until it finishes.
 
-GPU 沙盒允许通过 `gpu_run` 执行 Git 写操作（如 add、commit、checkout、pull、push）；容器项目继续通过 `container_run` 执行。Qoder 不再统一拦截普通 `git push`，仍限制破坏性 Git 操作。远程操作需要运行环境具备网络和相应仓库凭证。
-
-在终端恢复飞书创建的同一个 Codex/Qoder session：
+Resume the same Codex/Qoder session from a terminal:
 
 ```bash
 cd ~/workspace/AgentMessage
 uv run agent-message resume a1b2c3d4
 ```
 
-## Docker 项目
+## Sandbox Git Setup
 
-AgentMessage 与 Agent CLI 运行在宿主，项目命令通过 `container_run` 在已有容器中执行。容器必须把宿主项目目录以读写方式 bind mount 到 `container_path`。
+Configure the Git author identity and SSH authentication shared by all Bubblewrap sandbox projects:
+
+```bash
+cd ~/workspace/AgentMessage
+uv run python scripts/configure_sandbox_git.py
+```
+
+Prepare a dedicated SSH agent and verified `known_hosts` file for SSH push/pull, then restart AgentMessage after saving. See the [sandbox guide](assets/docs/sandbox-bubblewrap.en.md) for setup and troubleshooting. Container Git authentication is configured separately inside the container.
+
+## Docker Projects
+
+Run project commands in an existing Docker container. Bind-mount the host project directory read-write at `container_path`:
 
 ```toml
 [projects.container_project]
@@ -168,45 +184,43 @@ cd ~/workspace/AgentMessage
 uv run agent-message doctor --container container_project
 ```
 
-容器项目不能同时启用 Bubblewrap GPU。Qoder 不会获得宿主 Bash，只能使用受控的 `container_run`；Docker socket 只应开放给可信的 AgentMessage 服务用户。
+A container project cannot also enable the Bubblewrap sandbox. Qoder receives no host Bash tool and can use only the controlled `container_run`. Expose the Docker socket only to the trusted AgentMessage service user.
 
-## 卸载
+## Uninstall
 
-从仓库外运行卸载脚本：
+Run the uninstaller from outside the repository:
 
 ```bash
 cd ~
 bash ~/workspace/AgentMessage/uninstall.sh
 ```
 
-脚本会询问是否保留项目配置、任务数据库、日志和飞书凭证，直接回车默认不保留；真正删除前还会再次确认。选择保留时，数据会备份到 `~/.local/share/agent-message/backups/`。
+Removes AgentMessage and its service, with an optional backup of configuration, history, logs, and credentials. At the backup prompt, Enter defaults to no backup.
 
-## 安全与二次开发
+## Security and Development
 
-- 飞书凭证只保存在仓库外，且不会传给 Codex/Qoder 子进程。
-- 只注册允许 Agent 修改的项目；完整 JSONL 和命令日志保存在本地 `var/logs/`。
-- Qoder 使用 `auto` 权限、显式工具白名单和严格 MCP；Codex 使用 `workspace-write`。
-- 架构边界、模块扩展和测试要求见 [`AGENTS.md`](AGENTS.md)。
+- Feishu credentials remain outside the repository and are removed from Codex/Qoder child-process environments.
+- Register only projects the Agent may modify. Full JSONL and command logs remain local under `var/logs/`.
+- See [`AGENTS.md`](AGENTS.md) for architecture boundaries, extension recipes, and test requirements.
 
 ```bash
 cd ~/workspace/AgentMessage
 uv run agent-message doctor
 uv run agent-message tasks
-uv run python -m unittest discover -s tests -t . -v
 ```
 
-## 更新与重启
+## Update and Restart
 
 ```bash
 cd ~/workspace/AgentMessage
 
-# Python、projects.toml 或 feishu.env 有变化
+# Python, projects.toml, or feishu.env changed
 systemctl --user restart agent-message
 
-# pyproject.toml 或 uv.lock 有变化
+# pyproject.toml or uv.lock changed
 uv sync --frozen
 systemctl --user restart agent-message
 
-# systemd unit 有变化
+# The systemd unit changed
 bash install.sh --refresh-service
 ```

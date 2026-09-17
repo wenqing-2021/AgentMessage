@@ -15,7 +15,7 @@ dependencies = [
 
 [project.scripts]
 agent-message = "agent_message.cli:main"
-agent-message-gpu-mcp = "agent_message.runtimes.gpu.mcp:main"
+agent-message-sandbox-mcp = "agent_message.runtimes.sandbox.mcp:main"
 agent-message-container-mcp = "agent_message.runtimes.container.mcp:main"
 
 [tool.hatch.build.targets.wheel]

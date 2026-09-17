@@ -123,6 +123,42 @@ class AdapterTests(unittest.TestCase):
             self.assertNotIn("--ask-for-approval", command)
             self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", resumed)
 
+    def test_codex_reasoning_effort_for_new_and_resumed_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for session in (None, "thread-1"):
+                run = ClaimedRun(**{**make_run(root, session).__dict__, "reasoning_effort": "high"})
+                command = CodexAdapter().build_command(run, root / "final")
+                self.assertIn('model_reasoning_effort="high"', command)
+                if session:
+                    self.assertIn(session, command)
+                self.assertIn("sandbox_workspace_write.network_access=false", command)
+
+    def test_codex_effort_keeps_all_config_overrides_in_one_cli_scope(self) -> None:
+        # Repeating -c at exec/resume scope replaces the root override list in Codex.
+        # Cover real combinations; merely checking that flags exist missed this bug.
+        for runtime in ("plain", "sandbox", "container"):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                config = make_config(root,
+                    sandbox_projects=("alpha",) if runtime == "sandbox" else (),
+                    container_projects=("alpha",) if runtime == "container" else ())
+                adapter = CodexAdapter(app_config=config)
+                for session in (None, "thread-1"):
+                    run = ClaimedRun(**{**make_run(root, session).__dict__,
+                        "model": "gpt-6-astra", "reasoning_effort": "high"})
+                    command = adapter.build_command(run, root / "final")
+                    boundary = command.index("exec")
+                    self.assertNotIn("-c", command[boundary + 1:])
+                    overrides = [command[i + 1] for i in range(boundary) if command[i] == "-c"]
+                    self.assertIn('model_reasoning_effort="high"', overrides)
+                    self.assertIn("sandbox_workspace_write.network_access=false", overrides)
+                    if runtime != "plain":
+                        self.assertIn(f"mcp_servers.agent_message_{runtime}.required=true", overrides)
+                    self.assertEqual(command[command.index("-m") + 1], run.model)
+                    if session:
+                        self.assertIn(session, command)
+
     def test_codex_injects_model_flag_when_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -140,23 +176,23 @@ class AdapterTests(unittest.TestCase):
             plain = CodexAdapter().build_command(make_run(root), root / "final")
             self.assertNotIn("-m", plain)
 
-    def test_codex_injects_gpu_mcp_for_new_and_resumed_runs(self) -> None:
+    def test_codex_injects_sandbox_mcp_for_new_and_resumed_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            config = make_config(root, gpu_projects=("alpha",))
+            config = make_config(root, sandbox_gpu_projects=("alpha",))
             adapter = CodexAdapter(app_config=config)
             command = adapter.build_command(make_run(root), root / "final")
             joined = "\n".join(command)
             self.assertIn("developer_instructions=", joined)
-            self.assertIn("MUST use the gpu_run MCP tool", joined)
-            self.assertIn("mcp_servers.agent_message_bwrap_gpu.command", joined)
-            self.assertIn("agent_message.runtimes.gpu.mcp", joined)
-            self.assertIn('"gpu_run"', joined)
+            self.assertIn("MUST use the sandbox_run MCP tool", joined)
+            self.assertIn("mcp_servers.agent_message_sandbox.command", joined)
+            self.assertIn("agent_message.runtimes.sandbox.mcp", joined)
+            self.assertIn('"sandbox_run"', joined)
             self.assertIn("--run-id", joined)
             resumed = adapter.build_command(make_run(root, "thread-1"), root / "final")
             self.assertIn("resume", resumed)
-            self.assertIn("mcp_servers.agent_message_bwrap_gpu.required=true", resumed)
-            self.assertIn("[AgentMessage GPU execution policy]", resumed[-1])
+            self.assertIn("mcp_servers.agent_message_sandbox.required=true", resumed)
+            self.assertIn("[AgentMessage sandbox execution policy]", resumed[-1])
             self.assertTrue(resumed[-1].endswith("say hello"))
 
     def test_codex_injects_container_mcp_for_new_and_resumed_runs(self) -> None:
@@ -217,34 +253,34 @@ class AdapterTests(unittest.TestCase):
             for key in inherited:
                 self.assertNotIn(key, environment)
 
-    def test_qoder_gpu_command_exposes_only_approved_gpu_mcp(self) -> None:
+    def test_qoder_sandbox_command_exposes_only_approved_sandbox_mcp(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             config = make_config(
                 root,
-                gpu_projects=("alpha",),
+                sandbox_gpu_projects=("alpha",),
                 qoder_only_projects=("alpha",),
             )
             command = QoderAdapter(config).build_command(make_run(root), root / "final")
             tools = command[command.index("--tools") + 1].split(",")
             self.assertIn("Bash", tools)
-            self.assertIn("mcp__agent_message_bwrap_gpu__gpu_run", tools)
+            self.assertIn("mcp__agent_message_sandbox__sandbox_run", tools)
             self.assertEqual(
                 command[command.index("--allowed-mcp-server-names") + 1],
-                "agent_message_bwrap_gpu",
+                "agent_message_sandbox",
             )
             self.assertEqual(
                 command[command.index("--allowed-tools") + 1],
-                "mcp__agent_message_bwrap_gpu__gpu_run",
+                "mcp__agent_message_sandbox__sandbox_run",
             )
             payload = json.loads(command[command.index("--mcp-config") + 1])
-            server = payload["mcpServers"]["agent_message_bwrap_gpu"]
+            server = payload["mcpServers"]["agent_message_sandbox"]
             self.assertEqual(server["type"], "stdio")
-            self.assertIn("agent_message.runtimes.gpu.mcp", server["args"])
+            self.assertIn("agent_message.runtimes.sandbox.mcp", server["args"])
             self.assertIn("--run-id", server["args"])
             self.assertNotIn("mcp__*", command[command.index("--disallowed-tools") + 1])
-            self.assertIn("MUST use the gpu_run MCP tool", "\n".join(command))
-            self.assertIn("[AgentMessage GPU execution policy]", command[-1])
+            self.assertIn("MUST use the sandbox_run MCP tool", "\n".join(command))
+            self.assertIn("[AgentMessage sandbox execution policy]", command[-1])
 
     def test_qoder_container_command_omits_host_bash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
