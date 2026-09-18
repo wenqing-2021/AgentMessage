@@ -69,7 +69,7 @@ A local commit needs a committer identity, not an SSH key. Add these settings on
 sandbox_git_user_name = "Alice"
 sandbox_git_user_email = "alice@example.com"
 # SSH authentication uses these two global absolute paths and requires both:
-sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh.sock"
+sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh/agent.sock"
 sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
 ```
 
@@ -77,14 +77,77 @@ sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
 
 Adjust the absolute paths for the service user. `sandbox_ssh_agent_socket` must be a Unix socket owned by that user; every run checks that the socket and the known-hosts file exist. Without configuration the runner does not inherit `SSH_AUTH_SOCK`. Invalid configuration stops that run with an explicit error.
 
-Start a dedicated agent as the user that runs AgentMessage, then add the keys the project needs:
+### Start the SSH agent automatically with WSL
+
+Enable `[boot]` / `systemd=true` in `/etc/wsl.conf` first. Only enabling systemd for the first time requires `wsl --shutdown` from Windows and reopening the distribution.
+
+`install.sh` now installs and enables this dedicated user service by default; it listens on the fixed socket `/run/user/<uid>/agent-message-ssh/agent.sock`, so a normal installation needs no manual step. In the `service` stage it copies `deploy/agent-message-ssh-agent.service` to `~/.config/systemd/user/agent-message-ssh-agent.service`, `deploy/agent-message-ssh-agent.conf` to `~/.config/systemd/user/agent-message.service.d/ssh-agent.conf`, and `scripts/load_ssh_keys.py` to `~/.local/libexec/agent-message/load_ssh_keys.py`, all with mode `600`. It then runs `systemctl --user daemon-reload`, enables and starts the agent, and enables and restarts `agent-message.service`. Repository systemd templates all live in `deploy/`; `install.sh` renders the bridge unit from `deploy/agent-message.service`, replacing its placeholders with the real install path, credentials file, executable and PATH. Only a manual deployment or a unit change needs the managed files reinstalled from the latest templates:
 
 ```bash
-ssh-agent -a "$XDG_RUNTIME_DIR/agent-message-ssh.sock"
-SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh.sock" ssh-add ~/.ssh/id_ed25519
+cd ~/workspace/AgentMessage && bash install.sh --refresh-service
 ```
 
-Private key passphrases are entered only in the host terminal. Keep the agent running; after a machine restart, start it again and reload the keys. A fixed socket path means the systemd service never needs to inherit the terminal's `SSH_AUTH_SOCK`. Verify host fingerprints for known_hosts through a trusted channel beforehand; unknown or changed host keys are rejected, and disabling host verification is not a fix.
+Linger starts the user service manager without a terminal login. `install.sh` never enables it, so turn it on yourself once if you need that:
+
+```bash
+sudo loginctl enable-linger "$(id -un)"
+```
+
+Verify the installed agent:
+
+```bash
+systemctl --user status agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+For a manual deployment without `install.sh`, copy the same files from the repository yourself:
+
+```bash
+cd ~/workspace/AgentMessage
+mkdir -p ~/.config/systemd/user/agent-message.service.d ~/.local/libexec/agent-message
+install -m 600 scripts/load_ssh_keys.py ~/.local/libexec/agent-message/
+install -m 600 deploy/agent-message-ssh-agent.service ~/.config/systemd/user/
+install -m 600 deploy/agent-message-ssh-agent.conf ~/.config/systemd/user/agent-message.service.d/ssh-agent.conf
+systemctl --user daemon-reload
+systemctl --user enable --now agent-message-ssh-agent.service
+```
+
+At each startup, the service scans the top level of `~/.ssh` and loads every private key owned by the current user with no group/other permissions that unlocks without a passphrase. It recognizes OpenSSH, RSA, DSA, EC, and PKCS#8 headers regardless of filename; matching `.pub` files are not required. Symlinks, directories, public keys, configuration, and known-host files are ignored. Encrypted or malformed keys are skipped without prompting or modifying them; a failed key does not block the remaining keys.
+
+Sandboxes can authenticate/sign with all automatically loaded keys. Logs report only loaded/skipped counts, not key material, paths, or fingerprints. Unlock encrypted keys manually in a host terminal:
+
+```bash
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add ~/.ssh/your_encrypted_key
+```
+
+After adding keys, restart the dedicated agent when no sandbox tasks are running to rescan. Restarting loses previously unlocked encrypted keys, so unlock those again:
+
+```bash
+systemctl --user restart agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+Update global `sandbox_ssh_agent_socket` to `/run/user/<your uid>/agent-message-ssh/agent.sock`, keeping the verified known-hosts file. You can also run the setup wizard once the agent is active:
+
+```bash
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" uv run python scripts/configure_sandbox_git.py
+# If a previous socket is configured, enter the new path instead of accepting the old value.
+# Wait for current tasks to finish before restarting:
+systemctl --user restart agent-message.service
+```
+
+Linger starts the user service manager when the distribution boots. The dependency orders AgentMessage after agent startup and key loading. A crashed agent restarts and reloads its keys. `Wants` avoids terminating active AgentMessage tasks when the agent restarts; new sandbox commands fail explicitly while its socket is unavailable.
+
+Verify with:
+
+```bash
+loginctl show-user "$(id -un)" -p Linger
+systemctl --user is-enabled agent-message.service agent-message-ssh-agent.service
+systemctl --user is-active agent-message.service agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+This starts services when the WSL **distribution starts**; it does not launch the distribution on Windows login. Verify known-host fingerprints through a trusted channel. Each managed file carries a `# Managed by AgentMessage:` marker on its first line; `uninstall.sh` stops and removes all three of them, and keeps your SSH keys, other agents, and the shared user linger setting.
 
 After restarting AgentMessage, run `git add`, `git commit`, and authorized `git push`/`git pull` through `sandbox_run`. The sandbox does not load the host `~/.ssh/config`, so remotes that rely on host aliases or custom ports must use an SSH URL with the actual host and port. It also does not load the host global Git configuration; existing commit-signing settings in the repository are preserved, and any signing key or configuration must be provided inside the project. Private keys can sign over SSH through the agent.
 

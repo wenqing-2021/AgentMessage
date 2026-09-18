@@ -1,0 +1,25 @@
+# Managed by AgentMessage: dedicated SSH agent
+[Unit]
+Description=Dedicated SSH agent for AgentMessage sandboxes
+
+[Service]
+# ssh-agent binds its socket before its parent exits. Forking makes ExecStartPost
+# wait for that readiness point before trying to load the key.
+Type=forking
+RuntimeDirectory=agent-message-ssh
+RuntimeDirectoryMode=0700
+Environment=SSH_AUTH_SOCK=%t/agent-message-ssh/agent.sock
+Environment=SSH_ASKPASS_REQUIRE=never
+ExecStart=/usr/bin/ssh-agent -a %t/agent-message-ssh/agent.sock
+# The installed helper scans ~/.ssh and never prompts for passphrases.
+ExecStartPost=/usr/bin/python3 %h/.local/libexec/agent-message/load_ssh_keys.py
+StandardInput=null
+StandardOutput=null
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

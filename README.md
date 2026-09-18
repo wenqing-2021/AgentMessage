@@ -162,6 +162,8 @@ cd ~/workspace/AgentMessage
 uv run python scripts/configure_sandbox_git.py
 ```
 
+For automatic SSH-agent startup on WSL boot, follow the [systemd setup](assets/docs/sandbox-bubblewrap.en.md#start-the-ssh-agent-automatically-with-wsl). `install.sh` installs and enables the dedicated user service by default, so no files need copying by hand; run `bash install.sh --refresh-service` to reinstall its units from the latest templates. The service scans `~/.ssh` and loads all unencrypted private keys before AgentMessage starts; linger enables startup without a terminal login and still has to be enabled by the user.
+
 Prepare a dedicated SSH agent and verified `known_hosts` file for SSH push/pull, then restart AgentMessage after saving. See the [sandbox guide](assets/docs/sandbox-bubblewrap.en.md) for setup and troubleshooting. Container Git authentication is configured separately inside the container.
 
 ## Docker Projects

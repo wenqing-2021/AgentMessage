@@ -69,7 +69,7 @@ uv run agent-message doctor --sandbox your_proj_name
 sandbox_git_user_name = "Alice"
 sandbox_git_user_email = "alice@example.com"
 # SSH 认证使用下面两个全局绝对路径，须同时配置：
-sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh.sock"
+sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh/agent.sock"
 sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
 ```
 
@@ -77,14 +77,77 @@ sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
 
 路径按本机服务用户调整。`sandbox_ssh_agent_socket` 必须指向该用户持有的 Unix socket；每次执行都会检查 socket 和 known_hosts 是否存在。没有配置时不自动继承 `SSH_AUTH_SOCK`。配置错误会终止该次运行并返回明确错误。
 
-在宿主以运行 AgentMessage 的用户启动专用 agent，再添加项目需要的密钥：
+### WSL 启动时自动启动 SSH agent
+
+WSL 的 `/etc/wsl.conf` 需要已有 `[boot]` / `systemd=true`。首次开启需从 Windows 执行 `wsl --shutdown` 再打开发行版；正常配置服务不需要关闭 WSL。
+
+`install.sh` 现在会默认安装并启用这套专用 systemd 用户服务，固定 socket 位于 `/run/user/<uid>/agent-message-ssh/agent.sock`，正常安装无需任何手工步骤。`service` 阶段会把 `deploy/agent-message-ssh-agent.service` 复制到 `~/.config/systemd/user/agent-message-ssh-agent.service`、`deploy/agent-message-ssh-agent.conf` 复制到 `~/.config/systemd/user/agent-message.service.d/ssh-agent.conf`、`scripts/load_ssh_keys.py` 复制到 `~/.local/libexec/agent-message/load_ssh_keys.py`，三者均为 `600`；随后执行 `systemctl --user daemon-reload`，启用并启动 agent，最后启用并重启 `agent-message.service`。仓库内的 systemd 模板统一放在 `deploy/`；本体服务 unit 由 `install.sh` 基于 `deploy/agent-message.service` 渲染，把占位符替换为真实安装路径、凭证文件、可执行文件和 PATH。只有手工部署或更新 unit 时，才需要按最新模板重新安装这三个受管文件：
 
 ```bash
-ssh-agent -a "$XDG_RUNTIME_DIR/agent-message-ssh.sock"
-SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh.sock" ssh-add ~/.ssh/id_ed25519
+cd ~/workspace/AgentMessage && bash install.sh --refresh-service
 ```
 
-私钥口令只在宿主终端输入。agent 应保持运行；重启机器后需要重新启动并加载密钥。固定 socket 路径使 systemd 服务无需继承终端的 `SSH_AUTH_SOCK`。known_hosts 应预先通过可信渠道核对主机指纹；未知或改变的主机公钥会被拒绝，不能靠关闭主机校验解决。
+`linger` 使用户服务管理器无需终端登录即可启动。`install.sh` 不会自动开启，需要时请自行执行一次：
+
+```bash
+sudo loginctl enable-linger "$(id -un)"
+```
+
+验证安装结果：
+
+```bash
+systemctl --user status agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+不使用 `install.sh` 的手工部署，也可自行从仓库复制同一批文件：
+
+```bash
+cd ~/workspace/AgentMessage
+mkdir -p ~/.config/systemd/user/agent-message.service.d ~/.local/libexec/agent-message
+install -m 600 scripts/load_ssh_keys.py ~/.local/libexec/agent-message/
+install -m 600 deploy/agent-message-ssh-agent.service ~/.config/systemd/user/
+install -m 600 deploy/agent-message-ssh-agent.conf ~/.config/systemd/user/agent-message.service.d/ssh-agent.conf
+systemctl --user daemon-reload
+systemctl --user enable --now agent-message-ssh-agent.service
+```
+
+服务每次启动时自动扫描 `~/.ssh` 顶层文件，加载所有当前用户拥有、组和其他用户无访问权限、且无需口令解锁的私钥。支持 OpenSSH、RSA、DSA、EC 和 PKCS#8 私钥格式；不依赖文件名，也不要求有对应 `.pub`。符号链接、目录、公钥、`config`、`known_hosts` 等文件均跳过。加密或损坏的私钥也跳过，不弹出口令提示、不修改密钥；单把密钥加载失败不会阻止其他密钥加载。
+
+所有自动加载的密钥都可被沙箱用于认证或签名。日志只记录加载/跳过数量，不输出密钥、文件名或公钥指纹。有口令的密钥仍可在宿主终端手动解锁：
+
+```bash
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add ~/.ssh/your_encrypted_key
+```
+
+新增密钥后，在没有沙箱任务运行时重启专用 agent 即可重新扫描；重启会丢失之前手动解锁的密钥，需要再次解锁：
+
+```bash
+systemctl --user restart agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+将全局 `sandbox_ssh_agent_socket` 更新为 `/run/user/<id -u 的输出>/agent-message-ssh/agent.sock`，保持 `sandbox_ssh_known_hosts` 为已验证的文件。也可在 socket 启动后运行配置向导：
+
+```bash
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" uv run python scripts/configure_sandbox_git.py
+# 已有旧路径时，在向导中输入新路径，不要直接保留旧值。
+# 等待当前任务完成，再加载新配置：
+systemctl --user restart agent-message.service
+```
+
+`linger` 使用户服务管理器随发行版启动；依赖配置让 AgentMessage 等到 SSH agent 的启动及密钥加载步骤结束。agent 异常退出时会自动重启并重新加载密钥。依赖使用 `Wants`，agent 重启不会连带终止正在执行的 AgentMessage 任务；agent 暂时不可用时新沙箱命令会明确失败。
+
+验证：
+
+```bash
+loginctl show-user "$(id -un)" -p Linger
+systemctl --user is-enabled agent-message.service agent-message-ssh-agent.service
+systemctl --user is-active agent-message.service agent-message-ssh-agent.service
+SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
+```
+
+这保证 WSL **发行版启动时**拉起服务，不会替你在 Windows 登录时启动一个尚未运行的发行版。`known_hosts` 中的主机指纹仍须通过可信渠道核对。三处受管文件的首行都带有 `# Managed by AgentMessage:` 托管标记，卸载 AgentMessage 时 `uninstall.sh` 会停用并删除它们，保留 SSH 密钥、其他 agent 和用户共享的 linger 设置。
 
 重启 AgentMessage 后，通过 `sandbox_run` 执行 `git add`、`git commit` 和授权的 `git push`/`git pull`。沙箱不加载宿主 `~/.ssh/config`，使用主机别名、自定义端口的 remote 需改用实际主机和端口的 SSH URL。沙箱也不加载宿主全局 Git 配置；仓库中已有的 commit 签名配置不会被关闭，签名所需公钥及配置须在项目内自行配置，私钥可由 agent 执行 SSH 签名。
 

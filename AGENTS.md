@@ -56,7 +56,7 @@ src/agent_message/
 └── cli.py                   # 本地统一命令行入口
 ```
 
-仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；Bubblewrap 沙箱等较长的用户文档放在 `assets/docs/`。
+仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成：`deploy/` 存放 systemd 模板，本体 unit 模板含占位符并由 `install.sh` 渲染，SSH agent unit、drop-in 与 `scripts/load_ssh_keys.py` 也由它在 service 阶段默认安装并启用；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；Bubblewrap 沙箱等较长的用户文档放在 `assets/docs/`。
 
 保持以下依赖方向：
 
@@ -116,6 +116,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - 项目只能来自 `config/projects.toml` 的绝对路径白名单；飞书消息不能提交路径。
 - App ID、App Secret 和初始 open_id 白名单只从环境变量读取。
 - Agent 子进程环境必须移除 `AGENT_MESSAGE_FEISHU_*` 和 `AGENT_MESSAGE_ALLOWED_OPEN_IDS`，不得让 Codex/Qoder 或其普通 Bash 继承飞书凭证。
+- 专用 SSH agent 由 `deploy/agent-message-ssh-agent.service` 与 `deploy/agent-message-ssh-agent.conf` 定义，`install.sh` 默认安装启用，`uninstall.sh` 仅按 `# Managed by AgentMessage:` 标记清理；`scripts/load_ssh_keys.py` 只对当前用户所有、无 group/other 权限且无口令的私钥执行 `ssh-add`，不得提示口令、复制私钥进仓库或关闭主机指纹校验。
 - `install.sh` 的凭证输入必须通过 `/dev/tty`，App Secret 不回显；断点文件、环境文件、项目配置和生成的 unit 保持 `0600`。
 - `uninstall.sh` 必须先校验精确安装路径、停止服务并完成可选备份，再删除仓库和凭证目录；不得删除 systemd、uv、Agent CLI、Docker 或 Bubblewrap。
 - 不要把真实凭证、open_id、用户目录、私有项目名或真实容器名写入 tracked 文件。

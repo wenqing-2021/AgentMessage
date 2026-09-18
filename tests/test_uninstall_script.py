@@ -101,6 +101,32 @@ class UninstallScriptTests(unittest.TestCase):
             )
             self.assertFalse((Path(environment["XDG_DATA_HOME"]) / "agent-message").exists())
 
+    def test_optional_ssh_service_cleanup_preserves_keys_and_unmanaged_units(self) -> None:
+        for managed in (True, False):
+            with self.subTest(managed=managed), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                install_dir, environment = self._fixture(root)
+                units = Path(environment["XDG_CONFIG_HOME"]) / "systemd/user"
+                agent_unit = units / "agent-message-ssh-agent.service"
+                dropin = units / "agent-message.service.d/ssh-agent.conf"
+                dropin.parent.mkdir()
+                header = "# Managed by AgentMessage: dedicated SSH agent\n" if managed else "# custom\n"
+                agent_unit.write_text(header + "[Service]\n")
+                dropin.write_text(header + "[Unit]\n")
+                loader = Path(environment["HOME"]) / ".local/libexec/agent-message/load_ssh_keys.py"
+                loader.parent.mkdir(parents=True)
+                loader.write_text("# Managed by AgentMessage: SSH key loader\n" if managed else "# custom\n")
+                key = Path(environment["HOME"]) / ".ssh/id_ed25519"
+                key.parent.mkdir()
+                key.write_text("test key sentinel")
+                result = subprocess.run(["bash", str(UNINSTALLER), "--install-dir", str(install_dir),
+                    "--purge-data", "--yes"], env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(agent_unit.exists(), not managed)
+                self.assertEqual(dropin.exists(), not managed)
+                self.assertEqual(loader.exists(), not managed)
+                self.assertEqual(key.read_text(), "test key sentinel")
+
     def test_keep_data_backs_up_before_removal(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

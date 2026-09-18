@@ -9,6 +9,11 @@ CONFIG_DIR="$CONFIG_HOME/agent-message"
 ENV_FILE="$CONFIG_DIR/feishu.env"
 SYSTEMD_USER_DIR="$CONFIG_HOME/systemd/user"
 UNIT_FILE="$SYSTEMD_USER_DIR/agent-message.service"
+SSH_AGENT_UNIT_FILE="$SYSTEMD_USER_DIR/agent-message-ssh-agent.service"
+SSH_AGENT_DROPIN_DIR="$SYSTEMD_USER_DIR/agent-message.service.d"
+SSH_AGENT_DROPIN_FILE="$SSH_AGENT_DROPIN_DIR/ssh-agent.conf"
+SSH_AGENT_LOADER_DIR="$HOME/.local/libexec/agent-message"
+SSH_AGENT_LOADER_FILE="$SSH_AGENT_LOADER_DIR/load_ssh_keys.py"
 PROJECT_CONFIG="$INSTALL_DIR/config/projects.toml"
 STATE_FILE="$INSTALL_DIR/.git/agent-message-install-stage"
 REFRESH_SERVICE=false
@@ -31,9 +36,12 @@ usage() {
 Usage: bash install.sh [--install-dir PATH] [--refresh-service]
 
 Clone and install AgentMessage, collect Feishu credentials, and enable its
-systemd user service. The default install directory is ~/workspace/AgentMessage.
-Re-running the same command resumes from the last completed stage.
-Use --refresh-service to regenerate an installed systemd unit from this script.
+systemd user services. The default install directory is ~/workspace/AgentMessage.
+The bridge unit plus the dedicated SSH agent service and its key loader are
+installed and enabled together. Re-running the same command resumes from the
+last completed stage.
+Use --refresh-service to reinstall the systemd units from this script and the
+deploy/ templates without repeating the other stages.
 EOF
 }
 
@@ -319,8 +327,13 @@ EOF
     return 1
 }
 
+# deploy/agent-message.service is the single source of truth for the bridge unit.
+# The @AGENT_MESSAGE_*@ tokens are replaced here because the real install path,
+# the credentials file, the executable and PATH are only known while installing.
 write_user_service_file() {
-    local temporary escaped_install escaped_env quoted_executable quoted_config quoted_path path_value
+    local template="$INSTALL_DIR/deploy/agent-message.service"
+    local temporary escaped_install escaped_env quoted_executable quoted_config quoted_path path_value line
+    [[ -f $template ]] || die "Missing systemd template: $template"
     escaped_install=$(systemd_path_value "$INSTALL_DIR")
     escaped_env=$(systemd_path_value "$ENV_FILE")
     quoted_executable=$(systemd_quote "$INSTALL_DIR/.venv/bin/agent-message")
@@ -334,37 +347,50 @@ write_user_service_file() {
     umask 077
     {
         printf '%s\n' '# Managed by AgentMessage install.sh'
-        printf '%s\n' '[Unit]'
-        printf '%s\n' 'Description=Feishu bridge for Codex and Qoder CLI tasks'
-        printf '%s\n' 'After=network-online.target'
-        printf '%s\n' 'Wants=network-online.target'
-        printf '\n%s\n' '[Service]'
-        printf '%s\n' 'Type=simple'
-        printf 'WorkingDirectory=%s\n' "$escaped_install"
-        printf 'EnvironmentFile=%s\n' "$escaped_env"
-        printf 'Environment=%s\n' "$quoted_path"
-        printf 'ExecStart=%s run --config %s\n' "$quoted_executable" "$quoted_config"
-        printf '%s\n' 'Restart=on-failure'
-        printf '%s\n' 'RestartSec=5'
-        printf '%s\n' 'KillMode=control-group'
-        printf '%s\n' 'TimeoutStopSec=20'
-        printf '%s\n' 'NoNewPrivileges=true'
-        printf '%s\n' 'PrivateTmp=true'
-        printf '%s\n' 'UMask=0077'
-        printf '\n%s\n' '[Install]'
-        printf '%s\n' 'WantedBy=default.target'
+        while IFS= read -r line || [[ -n $line ]]; do
+            line=${line//@AGENT_MESSAGE_WORKING_DIRECTORY@/$escaped_install}
+            line=${line//@AGENT_MESSAGE_ENV_FILE@/$escaped_env}
+            line=${line//@AGENT_MESSAGE_PATH@/$quoted_path}
+            line=${line//@AGENT_MESSAGE_EXEC_START@/$quoted_executable run --config $quoted_config}
+            printf '%s\n' "$line"
+        done <"$template"
     } >"$temporary"
     chmod 600 "$temporary"
     mv "$temporary" "$UNIT_FILE"
 }
 
+install_ssh_agent_service() {
+    local unit_source="$INSTALL_DIR/deploy/agent-message-ssh-agent.service"
+    local dropin_source="$INSTALL_DIR/deploy/agent-message-ssh-agent.conf"
+    local loader_source="$INSTALL_DIR/scripts/load_ssh_keys.py"
+    local required
+
+    for required in "$unit_source" "$dropin_source" "$loader_source"; do
+        [[ -f $required ]] || die "Missing SSH agent installation file: $required"
+    done
+
+    mkdir -p "$SSH_AGENT_DROPIN_DIR" "$SSH_AGENT_LOADER_DIR"
+    chmod 700 "$SSH_AGENT_DROPIN_DIR" "$SSH_AGENT_LOADER_DIR"
+    # 0600 keeps the loader and units private to the service user; the marker on
+    # the first lines lets uninstall.sh remove only files this installer owns.
+    install -m 600 "$loader_source" "$SSH_AGENT_LOADER_FILE"
+    install -m 600 "$unit_source" "$SSH_AGENT_UNIT_FILE"
+    install -m 600 "$dropin_source" "$SSH_AGENT_DROPIN_FILE"
+    info "Installed the dedicated SSH agent service, its drop-in and the key loader."
+}
+
 install_user_service() {
     require_running_systemd_user
     write_user_service_file
+    install_ssh_agent_service
     systemctl --user daemon-reload
+    if ! systemctl --user enable --now agent-message-ssh-agent.service; then
+        warn "The dedicated SSH agent service did not start; sandbox SSH push/pull needs a running agent"
+        warn "Check that ssh-agent is installed and ~/.ssh is readable, then rerun with --refresh-service."
+    fi
     systemctl --user enable agent-message.service
     systemctl --user restart agent-message.service
-    info "systemd user service enabled and restarted."
+    info "systemd user services enabled and restarted."
 }
 
 credentials_are_complete() {
@@ -379,6 +405,7 @@ AgentMessage installation is complete.
   Repository:  $INSTALL_DIR
   Projects:    $PROJECT_CONFIG
   Credentials: $ENV_FILE
+  SSH agent:   $SSH_AGENT_UNIT_FILE
 
 Next:
   1. Log in to Codex with "codex login" or Qoder with "qodercli login".
@@ -448,6 +475,13 @@ main() {
                     continue
                 fi
                 if [[ ! -f $UNIT_FILE ]]; then
+                    write_stage service
+                    continue
+                fi
+                if [[ ! -f $SSH_AGENT_UNIT_FILE || ! -f $SSH_AGENT_DROPIN_FILE ||
+                    ! -f $SSH_AGENT_LOADER_FILE ]]; then
+                    # Installations created before the dedicated agent existed
+                    # get it on the next run instead of silently staying behind.
                     write_stage service
                     continue
                 fi

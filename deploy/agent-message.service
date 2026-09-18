@@ -5,11 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/workspace/AgentMessage
-EnvironmentFile=%h/.config/agent-message/feishu.env
-# If `dirname "$(command -v codex)"` differs, replace only `%h/.local/bin` below.
-Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=%h/workspace/AgentMessage/.venv/bin/agent-message run --config %h/workspace/AgentMessage/config/projects.toml
+WorkingDirectory=@AGENT_MESSAGE_WORKING_DIRECTORY@
+EnvironmentFile=@AGENT_MESSAGE_ENV_FILE@
+Environment=@AGENT_MESSAGE_PATH@
+ExecStart=@AGENT_MESSAGE_EXEC_START@
 Restart=on-failure
 RestartSec=5
 KillMode=control-group

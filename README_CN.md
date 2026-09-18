@@ -162,6 +162,8 @@ cd ~/workspace/AgentMessage
 uv run python scripts/configure_sandbox_git.py
 ```
 
+WSL 启动时自动拉起 SSH agent：`install.sh` 会默认安装并启用[专用用户服务](assets/docs/sandbox-bubblewrap.md#wsl-启动时自动启动-ssh-agent)，无需手动复制文件；需要更新 unit 时执行 `bash install.sh --refresh-service`。该服务会扫描 `~/.ssh` 并加载所有无需口令的私钥，再启动 AgentMessage；linger 仍需用户自行开启。
+
 SSH push/pull 需先准备专用 SSH agent 和已验证的 `known_hosts` 文件，保存配置后重启 AgentMessage。准备步骤与排错见 [沙箱指南](assets/docs/sandbox-bubblewrap.md)。容器 Git 认证需在容器内单独配置。
 
 ## Docker 项目

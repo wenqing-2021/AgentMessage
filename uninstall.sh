@@ -126,11 +126,34 @@ stop_and_remove_service() {
         warn "The systemd user manager is unavailable; no managed service could be stopped."
     fi
 
+    # Remove only our optional dedicated agent, never the user's other SSH agents.
+    local ssh_unit="${UNIT_FILE%/*}/agent-message-ssh-agent.service"
+    local ssh_dropin="${UNIT_FILE}.d/ssh-agent.conf"
+    if [[ -f $ssh_unit ]] && grep -q '^# Managed by AgentMessage:' "$ssh_unit"; then
+        if command -v systemctl >/dev/null 2>&1 &&
+            systemctl --user show-environment >/dev/null 2>&1; then
+            systemctl --user stop agent-message-ssh-agent.service ||
+                die "Failed to stop agent-message-ssh-agent.service; no files were removed."
+            systemctl --user disable agent-message-ssh-agent.service >/dev/null 2>&1 || true
+        fi
+        rm -f -- "$ssh_unit"
+    fi
+    if [[ -f $ssh_dropin ]] && grep -q '^# Managed by AgentMessage:' "$ssh_dropin"; then
+        rm -f -- "$ssh_dropin"
+        rmdir --ignore-fail-on-non-empty "${UNIT_FILE}.d" 2>/dev/null || true
+    fi
+    local ssh_loader="$HOME/.local/libexec/agent-message/load_ssh_keys.py"
+    if [[ -f $ssh_loader ]] && grep -q '^# Managed by AgentMessage: SSH key loader$' "$ssh_loader"; then
+        rm -f -- "$ssh_loader"
+        rmdir --ignore-fail-on-non-empty "$HOME/.local/libexec/agent-message" 2>/dev/null || true
+    fi
+    # User linger is shared with other services and must not be disabled here.
     rm -f -- "$UNIT_FILE"
     if command -v systemctl >/dev/null 2>&1 &&
         systemctl --user show-environment >/dev/null 2>&1; then
         systemctl --user daemon-reload
         systemctl --user reset-failed agent-message.service >/dev/null 2>&1 || true
+        systemctl --user reset-failed agent-message-ssh-agent.service >/dev/null 2>&1 || true
     fi
 }
 
