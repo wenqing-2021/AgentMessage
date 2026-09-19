@@ -8,6 +8,7 @@ import threading
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..core.config import AppConfig
@@ -15,13 +16,37 @@ from ..core.models import InboundMessage
 
 LOGGER = logging.getLogger(__name__)
 
+_SUPPORTED_MESSAGE_TYPES = {"text", "image", "file"}
+
+# Feishu im.v1.file.create file_type values; anything else uploads as "stream".
+_FEISHU_FILE_TYPES = {
+    ".opus": "opus",
+    ".mp4": "mp4",
+    ".pdf": "pdf",
+    ".doc": "doc",
+    ".docx": "doc",
+    ".xls": "xls",
+    ".xlsx": "xls",
+    ".ppt": "ppt",
+    ".pptx": "ppt",
+}
+
 
 class FeishuError(RuntimeError):
     pass
 
 
+def _describe(response: Any) -> str:
+    """Render a lark response with its API code and message instead of a repr."""
+    code = getattr(response, "code", None)
+    message = getattr(response, "msg", None)
+    if code is None and message is None:
+        return repr(response)
+    return f"code={code} msg={message}"
+
+
 def parse_receive_event(data: Any) -> InboundMessage | None:
-    """Extract only p2p text from an im.message.receive_v1 event.
+    """Extract a p2p text/image/file message from an im.message.receive_v1 event.
 
     The function accepts both lark-oapi model objects and plain dict fixtures.
     """
@@ -32,20 +57,54 @@ def parse_receive_event(data: Any) -> InboundMessage | None:
     message = event.get("message", {}) if isinstance(event, dict) else {}
     sender = event.get("sender", {}) if isinstance(event, dict) else {}
     sender_id = sender.get("sender_id", {}) if isinstance(sender, dict) else {}
-    if not isinstance(message, dict) or message.get("chat_type") != "p2p" or message.get("message_type") != "text":
+    if not isinstance(message, dict) or message.get("chat_type") != "p2p":
+        return None
+    message_type = message.get("message_type")
+    if message_type not in _SUPPORTED_MESSAGE_TYPES:
         return None
     content = message.get("content")
     try:
-        text = json.loads(content).get("text", "") if isinstance(content, str) else ""
+        payload = json.loads(content) if isinstance(content, str) else {}
     except json.JSONDecodeError:
         return None
+    if not isinstance(payload, dict):
+        return None
+    text = ""
+    file_key: str | None = None
+    file_name: str | None = None
+    if message_type == "text":
+        text = payload.get("text", "")
+        if not isinstance(text, str) or not text:
+            return None
+    elif message_type == "image":
+        file_key = payload.get("image_key")
+        if not isinstance(file_key, str) or not file_key:
+            return None
+    else:
+        file_key = payload.get("file_key")
+        name = payload.get("file_name")
+        if not isinstance(file_key, str) or not file_key:
+            return None
+        if name is not None and not isinstance(name, str):
+            return None
+        file_name = name
     event_id = header.get("event_id") if isinstance(header, dict) else None
     message_id = message.get("message_id")
     chat_id = message.get("chat_id")
     open_id = sender_id.get("open_id") if isinstance(sender_id, dict) else None
-    if not all(isinstance(value, str) and value for value in (event_id, message_id, chat_id, open_id, text)):
+    if not all(isinstance(value, str) and value for value in (event_id, message_id, chat_id, open_id)):
         return None
-    return InboundMessage(event_id, message_id, chat_id, "p2p", open_id, text)
+    return InboundMessage(
+        event_id,
+        message_id,
+        chat_id,
+        "p2p",
+        open_id,
+        text,
+        message_type=message_type,
+        file_key=file_key,
+        file_name=file_name,
+    )
 
 
 def _to_dict(value: Any) -> dict[str, Any]:
@@ -88,25 +147,119 @@ class FeishuGateway:
         self._client: Any | None = None
         self._ready = threading.Event()
 
-    def send_text(self, chat_id: str, content: str) -> None:
+    def _require_ready(self) -> tuple[Any, Any]:
         if not self._ready.wait(timeout=15) or self._lark is None or self._client is None:
             raise FeishuError("Feishu WebSocket SDK is not ready")
+        return self._lark, self._client
+
+    def _send_message(self, chat_id: str, msg_type: str, payload: dict[str, Any]) -> None:
+        lark, client = self._require_ready()
         body = (
-            self._lark.im.v1.CreateMessageRequestBody.builder()
+            lark.im.v1.CreateMessageRequestBody.builder()
             .receive_id(chat_id)
-            .msg_type("text")
-            .content(json.dumps({"text": content}, ensure_ascii=False))
+            .msg_type(msg_type)
+            .content(json.dumps(payload, ensure_ascii=False))
             .build()
         )
         request = (
-            self._lark.im.v1.CreateMessageRequest.builder()
+            lark.im.v1.CreateMessageRequest.builder()
             .receive_id_type("chat_id")
             .request_body(body)
             .build()
         )
-        response = self._client.im.v1.message.create(request)
+        response = client.im.v1.message.create(request)
         if not getattr(response, "success", lambda: False)():
-            raise FeishuError(f"send message failed: {response}")
+            raise FeishuError(f"send message failed: {_describe(response)}")
+
+    def send_text(self, chat_id: str, content: str) -> None:
+        self._send_message(chat_id, "text", {"text": content})
+
+    def send_media(self, chat_id: str, kind: str, path: Path) -> None:
+        if kind == "image":
+            self.send_image(chat_id, path)
+        elif kind == "file":
+            self.send_file(chat_id, path)
+        else:
+            raise FeishuError(f"unknown media kind: {kind}")
+
+    def send_image(self, chat_id: str, path: Path) -> None:
+        lark, client = self._require_ready()
+        with open(path, "rb") as stream:
+            body = (
+                lark.im.v1.CreateImageRequestBody.builder()
+                .image_type("message")
+                .image(stream)
+                .build()
+            )
+            request = lark.im.v1.CreateImageRequest.builder().request_body(body).build()
+            response = client.im.v1.image.create(request)
+        if not getattr(response, "success", lambda: False)():
+            raise FeishuError(f"upload image failed: {_describe(response)}")
+        image_key = getattr(getattr(response, "data", None), "image_key", None)
+        if not image_key:
+            raise FeishuError(f"upload image returned no image_key: {_describe(response)}")
+        self._send_message(chat_id, "image", {"image_key": image_key})
+
+    def send_file(self, chat_id: str, path: Path) -> None:
+        lark, client = self._require_ready()
+        file_type = _FEISHU_FILE_TYPES.get(path.suffix.lower(), "stream")
+        with open(path, "rb") as stream:
+            body = (
+                lark.im.v1.CreateFileRequestBody.builder()
+                .file_type(file_type)
+                .file_name(path.name)
+                .file(stream)
+                .build()
+            )
+            request = lark.im.v1.CreateFileRequest.builder().request_body(body).build()
+            response = client.im.v1.file.create(request)
+        if not getattr(response, "success", lambda: False)():
+            raise FeishuError(f"upload file failed: {_describe(response)}")
+        file_key = getattr(getattr(response, "data", None), "file_key", None)
+        if not file_key:
+            raise FeishuError(f"upload file returned no file_key: {_describe(response)}")
+        self._send_message(chat_id, "file", {"file_key": file_key})
+
+    def download_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        kind: str,
+        dest: Path,
+        max_bytes: int,
+    ) -> None:
+        """Download an inbound image/file resource to dest, enforcing max_bytes."""
+        lark, client = self._require_ready()
+        request = (
+            lark.im.v1.GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type(kind)
+            .build()
+        )
+        response = client.im.v1.message_resource.get(request)
+        if not getattr(response, "success", lambda: False)():
+            raise FeishuError(f"download resource failed: {_describe(response)}")
+        stream = getattr(response, "file", None)
+        if stream is None:
+            raise FeishuError("download resource returned no file stream")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        written = 0
+        try:
+            with open(dest, "wb") as output:
+                while True:
+                    chunk = stream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise FeishuError(
+                            f"attachment exceeds size limit ({max_bytes // (1024 * 1024)}MB)"
+                        )
+                    output.write(chunk)
+        except Exception:
+            dest.unlink(missing_ok=True)
+            raise
 
     def start_in_thread(self) -> threading.Thread:
         def callback(data: Any) -> None:

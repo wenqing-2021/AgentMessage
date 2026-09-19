@@ -193,7 +193,8 @@ class AdapterTests(unittest.TestCase):
             self.assertIn("resume", resumed)
             self.assertIn("mcp_servers.agent_message_sandbox.required=true", resumed)
             self.assertIn("[AgentMessage sandbox execution policy]", resumed[-1])
-            self.assertTrue(resumed[-1].endswith("say hello"))
+            self.assertIn("say hello", resumed[-1])
+            self.assertIn("send-to-feishu", resumed[-1])
 
     def test_codex_injects_container_mcp_for_new_and_resumed_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -212,7 +213,8 @@ class AdapterTests(unittest.TestCase):
             self.assertIn("resume", resumed)
             self.assertIn("mcp_servers.agent_message_container.required=true", resumed)
             self.assertIn("[AgentMessage container execution policy]", resumed[-1])
-            self.assertTrue(resumed[-1].endswith("say hello"))
+            self.assertIn("say hello", resumed[-1])
+            self.assertIn("send-to-feishu", resumed[-1])
 
     def test_qoder_ordinary_command_allows_bash_network_and_is_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -237,8 +239,11 @@ class AdapterTests(unittest.TestCase):
             self.assertNotIn("Bash(wget:*)", blocked)
             self.assertNotIn("Bash(ssh:*)", blocked)
             self.assertIn("mcp__*", blocked)
-            self.assertEqual(command[-1], malicious_prompt)
-            self.assertEqual(command.count(malicious_prompt), 1)
+            self.assertTrue(command[-1].startswith(malicious_prompt))
+            self.assertIn("send-to-feishu", command[-1])
+            self.assertEqual(
+                sum(malicious_prompt in part for part in command), 1
+            )
 
             resumed = QoderAdapter().build_command(make_run(root, "qoder-session"), root / "final")
             self.assertEqual(resumed[resumed.index("-r") + 1], "qoder-session")

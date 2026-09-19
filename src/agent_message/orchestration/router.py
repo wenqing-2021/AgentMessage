@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
 from ..agents.model_catalog import (
     REASONING_EFFORTS, configured_codex_model, configured_reasoning_effort, list_codex_models,
 )
 from .commands import HELP_TEXT, CommandError, NewTaskCommand, SimpleCommand, parse_command
 from ..core.config import AppConfig
+from ..core.media import (
+    IMAGE_MAX_BYTES, FILE_MAX_BYTES, INBOX_DIR, kind_for_path, resolve_project_file,
+    safe_filename,
+)
 from ..core.models import AgentKind, InboundMessage, Task, TaskOrigin, TaskStatus
 from ..core.state import StateStore
+
+LOGGER = logging.getLogger(__name__)
+
+# Downloads an inbound Feishu resource: (message_id, file_key, kind, dest, max_bytes).
+Downloader = Callable[[str, str, str, Path, int], None]
 
 
 def _agent_label(agent: AgentKind) -> str:
@@ -28,20 +41,31 @@ def _valid_model_name(name: str) -> bool:
 class MessageRouter:
     """Converts trusted Feishu messages to durable state changes and short replies."""
 
-    def __init__(self, config: AppConfig, state: StateStore) -> None:
+    def __init__(self, config: AppConfig, state: StateStore, downloader: Downloader | None = None) -> None:
         self.config = config
         self.state = state
+        self._downloader = downloader
 
     def handle(self, message: InboundMessage) -> list[str]:
-        if message.chat_type != "p2p" or not message.text.strip():
+        if message.chat_type != "p2p":
             return []
+        attachment = message.message_type in {"image", "file"} and bool(message.file_key)
+        if not attachment and not message.text.strip():
+            return []
+        audit_text = (
+            message.text
+            if message.text.strip()
+            else f"[{message.message_type}] {message.file_name or message.file_key}"
+        )
         # Save even unauthorised message IDs: Feishu retries must not produce unbounded work.
         if not self.state.register_inbound(
-            message.event_id, message.message_id, message.chat_id, message.sender_open_id, message.text
+            message.event_id, message.message_id, message.chat_id, message.sender_open_id, audit_text
         ):
             return []
         if not self.state.is_authorized(message.sender_open_id):
             return []
+        if attachment:
+            return self._attachment(message)
         try:
             parsed = parse_command(message.text)
         except CommandError as exc:
@@ -51,6 +75,55 @@ class MessageRouter:
         if isinstance(parsed, NewTaskCommand):
             return self._new(message, parsed)
         return self._simple(message, parsed)
+
+    def _attachment(self, message: InboundMessage) -> list[str]:
+        """Download an inbound image/file into the project and hand its path to the agent."""
+        assert message.file_key is not None
+        if self._downloader is None:
+            return ["当前服务未启用附件下载，请改用文本描述内容。"]
+        kind = message.message_type
+        label = "图片" if kind == "image" else "文件"
+        task = self.state.selected_task(message.chat_id, message.sender_open_id)
+        if task is not None:
+            project = self.config.projects[task.project_alias]
+        else:
+            project = self.config.projects[self.config.service.default_chat_project]
+        name = safe_filename(message.file_name)
+        if name is None:
+            name = (
+                f"image-{message.message_id}.jpg"
+                if kind == "image"
+                else f"file-{message.message_id}"
+            )
+        relative = INBOX_DIR / f"{message.message_id}-{name}"
+        destination = project.path / relative
+        limit = IMAGE_MAX_BYTES if kind == "image" else FILE_MAX_BYTES
+        try:
+            self._downloader(message.message_id, message.file_key, kind, destination, limit)
+        except Exception as exc:
+            LOGGER.warning("Failed to download Feishu %s %s: %s", kind, message.file_key, exc)
+            return [f"{label}下载失败：{exc}"]
+        note = (
+            f"用户通过飞书发送了{label}「{name}」，已保存到项目内路径：{relative.as_posix()}。"
+            "请先读取该文件，再结合上下文继续处理。"
+        )
+        if task is None:
+            created = self.state.create_task(
+                project_alias=project.alias,
+                agent=project.default_agent,
+                chat_id=message.chat_id,
+                owner_open_id=message.sender_open_id,
+                prompt=note,
+                origin=TaskOrigin.CHAT,
+            )
+            return [
+                f"已接收{label} {name}，默认 {_agent_label(project.default_agent)} 对话 "
+                f"{created.id} 已排队（{project.alias}）。"
+            ]
+        updated = self.state.queue_message(task.id, message.sender_open_id, note)
+        assert updated is not None
+        prefix = "已排队" if task.status == TaskStatus.RUNNING else "已安排继续"
+        return [f"已接收{label} {name}，{prefix}任务 {updated.id}。"]
 
     def _new(self, message: InboundMessage, command: NewTaskCommand) -> list[str]:
         project = self.config.projects.get(command.project_alias)
@@ -132,6 +205,26 @@ class MessageRouter:
                 f"（{project.alias}）。"
                 "接下来直接发送普通文本会继续它。"
             ]
+        if command.name == "send":
+            task = self.state.selected_task(message.chat_id, message.sender_open_id)
+            if task is None:
+                return ["没有当前任务，请先发送消息创建会话，或用 /use 选择任务。"]
+            project = self.config.projects[task.project_alias]
+            resolved = resolve_project_file(project.path, command.file_path or "")
+            if resolved is None:
+                return [
+                    "无法发送该文件：路径必须位于项目目录内、文件必须存在，"
+                    "且不超过大小限制（图片 10MB，其他文件 30MB）。"
+                ]
+            kind = kind_for_path(resolved)
+            label = "图片" if kind == "image" else "文件"
+            self.state.enqueue_outbox(
+                message.chat_id,
+                f"{label}：{resolved.name}",
+                kind=kind,
+                file_path=str(resolved),
+            )
+            return [f"已排队发送{label} {resolved.name}。"]
         if command.name == "use":
             task = self.state.select_task(message.chat_id, command.task_id or "", message.sender_open_id)
             return [f"当前任务已切换为 {task.id}。"] if task else [

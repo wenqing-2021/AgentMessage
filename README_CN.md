@@ -139,8 +139,21 @@ journalctl --user -u agent-message -f
 /logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
 /stop a1b2c3d4
+/send reports/result.png
 /help
 ```
+
+`/send` 把当前任务项目内的文件发送到飞书对话：图片（png/jpg/jpeg/gif/webp/bmp）以图片消息展示，其他格式以文件消息发送。路径必须位于项目目录内；图片不超过 10MB，其他文件不超过 30MB。
+
+也可以直接给机器人发送图片或文件消息：它们会被下载到项目的 `.agent-message/inbox/` 目录，并把路径交给 Agent，宿主机、Bubblewrap 沙箱和 bind mount 的容器内都能读取。大小限制相同；该目录不会自动清理，建议在项目的 `.gitignore` 中忽略 `.agent-message/`。
+
+Agent 发送项目文件使用 bridge 注入到项目内的脚本：
+
+```bash
+sh .agent-message/bin/send-to-feishu reports/result.png
+```
+
+脚本把请求写入 `.agent-message/outbox/` 并等待 bridge 处理；上传由 bridge 用自己的凭证完成，Agent 及其 shell 不会拿到飞书凭证。发送成功时脚本输出「已发送」并以 0 退出，失败时以非零退出并给出原因。限制相同：仅限项目内文件，图片 10MB、其他文件 30MB。如需让 Agent 主动使用，可在项目的 `AGENTS.md` 中写清这条调用约定。与 `/send` 不同，这条路径不进入 durable outbox，是立即执行的传输，结果由 Agent 在自己的回复中转述。
 
 `/model` 查看模型和思考强度；按名称或编号选择模型，使用 `next` / `prev` 循环切换。`/model 1 high` 同时设置模型与强度，`/model effort high` 只改强度，`/model effort default` 恢复默认强度。这些全局 Codex 设置重启后保留，从下一轮生效。
 

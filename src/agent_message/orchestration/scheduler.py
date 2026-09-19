@@ -12,6 +12,7 @@ from ..agents.adapters import adapter_for
 from ..core.config import AppConfig
 from ..core.models import AgentResult, ClaimedRun, ContainerJob
 from ..core.state import StateStore
+from ..core.transfer import ensure_send_script
 from ..runtimes.container.runner import terminate_container_process
 
 
@@ -61,6 +62,9 @@ class Scheduler:
 
     async def _run_claim(self, claimed: ClaimedRun) -> None:
         await self._send(claimed.chat_id, f"任务 {claimed.task_id} 已启动（{claimed.agent.value}）。")
+        # Agents send files by running the injected project script; refresh it here
+        # so long-lived projects pick up script updates with their next run.
+        ensure_send_script(claimed.project_path)
         adapter = adapter_for(
             claimed.agent,
             codex_tool_network=self.config.service.codex_tool_network,

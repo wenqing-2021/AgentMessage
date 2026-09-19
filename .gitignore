@@ -6,4 +6,4 @@ var/
 config/projects.toml
 *.sqlite
 *.sqlite-*
-
+.agent-message/

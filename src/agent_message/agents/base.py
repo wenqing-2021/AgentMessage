@@ -24,6 +24,18 @@ _MAX_PARSED_JSON_LINE_BYTES = 1024 * 1024
 _FEISHU_ENV_PREFIX = "AGENT_MESSAGE_FEISHU_"
 _SERVICE_ONLY_ENV_KEYS = frozenset({"AGENT_MESSAGE_ALLOWED_OPEN_IDS"})
 
+# Appended to every agent prompt: sending a file is an explicit script call, so the
+# agent gets a synchronous result instead of relying on output markers.
+FILE_SEND_HINT = (
+    "\n\n如需把项目内的图片或文档发送给飞书用户，请运行项目内的脚本："
+    "sh .agent-message/bin/send-to-feishu <项目内相对路径>"
+    "（例如 sh .agent-message/bin/send-to-feishu reports/result.png）。"
+    "脚本会立即上传并返回结果：输出「已发送」表示成功，非零退出并输出原因表示失败，"
+    "失败时请把原因告诉用户。只允许项目内文件，图片不超过 10MB，其他文件不超过 30MB；"
+    "需要发送多个文件时逐个调用。若本项目要求通过 sandbox_run 或 container_run "
+    "执行项目命令，请用同样的方式调用该脚本。"
+)
+
 
 class AdapterError(RuntimeError):
     pass

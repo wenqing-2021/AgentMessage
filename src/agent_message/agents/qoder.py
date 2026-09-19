@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from .base import AdapterError, AgentAdapter, ParsedAgentEvent
+from .base import FILE_SEND_HINT, AdapterError, AgentAdapter, ParsedAgentEvent
 from ..core.config import AppConfig
 from ..core.models import AgentKind, ClaimedRun, Task
 from ..runtimes.container.policy import CONTAINER_INSTRUCTIONS, CONTAINER_TURN_PREFIX
@@ -166,7 +166,7 @@ class QoderAdapter(AgentAdapter):
         )
         if run.session_id:
             command.extend(["-r", run.session_id])
-        prompt = (runtime.turn_prefix if runtime else "") + run.prompt
+        prompt = (runtime.turn_prefix if runtime else "") + run.prompt + FILE_SEND_HINT
         command.extend(["--output-format", "stream-json", "-p", prompt])
         return command
 

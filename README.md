@@ -139,8 +139,21 @@ Ordinary text continues the current task. When there is no current task, the def
 /logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
 /stop a1b2c3d4
+/send reports/result.png
 /help
 ```
+
+`/send` uploads a file from the current task's project to the chat: images (png/jpg/jpeg/gif/webp/bmp) arrive as Feishu image messages, everything else as file messages. Paths must stay inside the project; images are limited to 10MB and other files to 30MB.
+
+You can also send image or file messages directly to the bot. They are downloaded into the project at `.agent-message/inbox/` and handed to the agent with their path, so the host, Bubblewrap sandboxes, and bind-mounted containers can all read them. The same size limits apply, and the directory is not cleaned automatically; consider adding `.agent-message/` to the project's `.gitignore`.
+
+Agents send project files with the script the bridge keeps installed in the project:
+
+```bash
+sh .agent-message/bin/send-to-feishu reports/result.png
+```
+
+The script queues the file in `.agent-message/outbox/` and waits for the bridge, which does the upload with its own credentials, so nothing is exposed to the agent or its shell. It prints `已发送` and exits 0 when the file reached Feishu, and exits non-zero with the reason otherwise. The same limits apply: project files only, 10MB for images, 30MB for everything else. Add the call to the project's `AGENTS.md` if you want agents to reach for it without being asked. Unlike `/send`, this path is not queued in the durable outbox: it is a direct transfer whose result the agent reports in its own reply.
 
 `/model` lists available models and reasoning levels. Select by name or number, cycle with `next` / `prev`, or set effort with `/model 1 high` and `/model effort high`. Use `/model effort default` to reset effort. These global Codex settings persist across restarts and take effect on the next turn.
 

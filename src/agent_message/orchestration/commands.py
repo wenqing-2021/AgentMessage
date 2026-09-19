@@ -22,12 +22,13 @@ class NewTaskCommand:
 
 @dataclass(frozen=True)
 class SimpleCommand:
-    name: Literal["use", "status", "stop", "logs", "chat", "model", "compact", "help"]
+    name: Literal["use", "status", "stop", "logs", "chat", "model", "compact", "send", "help"]
     task_id: str | None = None
     log_lines: int | None = None
     log_source: Literal["agent", "sandbox", "container"] = "agent"
     model_name: str | None = None
     reasoning_effort: str | None = None
+    file_path: str | None = None
 
 
 ParsedCommand = NewTaskCommand | SimpleCommand | None
@@ -63,6 +64,9 @@ HELP_TEXT = """先认识 4 个概念：
 /logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
 /stop a1b2c3d4
+/send reports/result.png
+→ 把项目内的图片或文档发送到当前对话；图片不超过 10MB，其他文件不超过 30MB。
+也可以直接在对话里发送图片或文件，会自动保存到项目的 .agent-message/inbox/ 并交给 Agent。
 
 不确定当前任务时先发送 /status。任务描述不是任务 ID。"""
 
@@ -90,6 +94,10 @@ def parse_command(text: str) -> ParsedCommand:
         if len(parts) != 1:
             raise CommandError("/compact 不接收参数。")
         return SimpleCommand("compact")
+    if command == "/send":
+        if len(parts) != 2:
+            raise CommandError("用法：/send <项目内文件路径>")
+        return SimpleCommand("send", file_path=parts[1])
     if command == "/model":
         if len(parts) > 3 or (len(parts) == 2 and parts[1] == "effort"):
             raise CommandError("用法：/model [编号|模型名称|next|prev] [思考强度]，或 /model effort <强度|default>")

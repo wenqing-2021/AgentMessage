@@ -42,6 +42,9 @@ class InboundMessage:
     chat_type: str
     sender_open_id: str
     text: str
+    message_type: str = "text"
+    file_key: str | None = None
+    file_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,8 @@ class OutboxMessage:
     id: int
     chat_id: str
     content: str
+    kind: str = "text"
+    file_path: str | None = None
 
 
 @dataclass(frozen=True)

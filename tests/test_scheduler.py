@@ -135,6 +135,37 @@ class SchedulerTests(unittest.TestCase):
             finally:
                 state.close()
 
+    def test_run_installs_transfer_script_before_starting_the_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp))
+            state = StateStore(config)
+            try:
+                state.create_task(
+                    project_alias="alpha",
+                    agent=AgentKind.CODEX,
+                    chat_id="chat-1",
+                    owner_open_id="ou-1",
+                    prompt="work",
+                )
+                claimed = state.claimed_run()
+                assert claimed is not None
+                seen: list[bool] = []
+
+                class ScriptCheckingAdapter(FinishedAdapter):
+                    async def execute(self, run, on_pid, on_session=None, on_progress=None):  # type: ignore[no-untyped-def]
+                        seen.append((run.project_path / ".agent-message/bin/send-to-feishu").is_file())
+                        return await super().execute(run, on_pid, on_session, on_progress)
+
+                scheduler = Scheduler(config, state, lambda _chat, _text: None)
+                with patch(
+                    "agent_message.orchestration.scheduler.adapter_for",
+                    return_value=ScriptCheckingAdapter(),
+                ):
+                    asyncio.run(scheduler._run_claim(claimed))
+                self.assertEqual(seen, [True])
+            finally:
+                state.close()
+
     def test_run_forwards_safe_progress_updates(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = make_config(Path(temp))

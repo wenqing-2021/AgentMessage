@@ -9,6 +9,7 @@ from pathlib import Path
 from .base import (
     AdapterError,
     AgentAdapter,
+    FILE_SEND_HINT,
     ParsedAgentEvent,
     PidCallback,
     ProgressCallback,
@@ -237,7 +238,7 @@ class CodexAdapter(AgentAdapter):
         runtime_config, prompt_prefix = self._runtime_parts(
             run.task_id, run.project_alias, run.run_id
         )
-        prompt = prompt_prefix + run.prompt
+        prompt = prompt_prefix + run.prompt + FILE_SEND_HINT
         model_args = ["-m", run.model] if run.model else []
         # Codex replaces parent -c overrides when exec/resume has its own -c.
         # Keep every override together so effort cannot discard MCP or sandbox policy.

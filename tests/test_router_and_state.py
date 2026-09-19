@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_message.agents.model_catalog import CodexModel
-from agent_message.core.models import AgentKind, TaskOrigin, TaskStatus
+from agent_message.core.models import AgentKind, InboundMessage, TaskOrigin, TaskStatus
 from agent_message.core.state import StateStore
 from agent_message.orchestration.commands import CommandError, parse_command
 from agent_message.orchestration.router import MessageRouter
@@ -507,3 +507,213 @@ class ModelCommandTests(unittest.TestCase):
         self.assertEqual(second.model, "new-model")
         self.assertEqual(second.reasoning_effort, "high")
         self.assertEqual(second.prompt, "continue")
+
+
+class AttachmentRoutingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.config = make_config(Path(self.temp.name), ("alpha",))
+        self.state = StateStore(self.config)
+        self.state.authorize("ou-1")
+        self.downloads: list[tuple[str, str, str, Path, int]] = []
+
+        def fake_downloader(
+            message_id: str, file_key: str, kind: str, dest: Path, max_bytes: int
+        ) -> None:
+            self.downloads.append((message_id, file_key, kind, dest, max_bytes))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"payload")
+
+        self.router = MessageRouter(self.config, self.state, downloader=fake_downloader)
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self.temp.cleanup()
+
+    @staticmethod
+    def attachment(
+        message_type: str = "image",
+        event_id: str = "e1",
+        message_id: str = "m1",
+        open_id: str = "ou-1",
+        file_name: str | None = None,
+    ) -> InboundMessage:
+        return InboundMessage(
+            event_id,
+            message_id,
+            "chat-1",
+            "p2p",
+            open_id,
+            "",
+            message_type=message_type,
+            file_key="key-1",
+            file_name=file_name,
+        )
+
+    def test_image_downloads_into_project_and_queues_note(self) -> None:
+        self.router.handle(inbound("/new alpha work", "e0", "m0"))
+        first = self.state.claimed_run()
+        assert first is not None
+        self.state.finish_run(
+            run_id=first.run_id,
+            task_id=first.task_id,
+            exit_code=0,
+            session_id="thread-1",
+            final_message="done",
+            error=None,
+        )
+
+        replies = self.router.handle(self.attachment())
+
+        self.assertIn("已接收图片", replies[0])
+        project_path = self.config.projects["alpha"].path
+        expected = project_path / ".agent-message" / "inbox" / "m1-image-m1.jpg"
+        self.assertEqual(expected.read_bytes(), b"payload")
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.downloads[0][2], "image")
+        second = self.state.claimed_run()
+        assert second is not None
+        self.assertEqual(second.session_id, "thread-1")
+        self.assertIn(".agent-message/inbox/m1-image-m1.jpg", second.prompt)
+
+    def test_file_attachment_creates_default_chat_when_no_task(self) -> None:
+        replies = self.router.handle(self.attachment("file", file_name="报告.pdf"))
+
+        self.assertIn("已接收文件", replies[0])
+        self.assertIn("默认 Codex 对话", replies[0])
+        project_path = self.config.projects["alpha"].path
+        expected = project_path / ".agent-message" / "inbox" / "m1-报告.pdf"
+        self.assertTrue(expected.is_file())
+        claimed = self.state.claimed_run()
+        assert claimed is not None
+        self.assertIn(".agent-message/inbox/m1-报告.pdf", claimed.prompt)
+
+    def test_attachment_is_deduplicated_and_requires_authorization(self) -> None:
+        self.router.handle(self.attachment())
+        again = self.router.handle(self.attachment())
+        self.assertEqual(again, [])
+        self.assertEqual(len(self.downloads), 1)
+
+        outsider = self.router.handle(
+            self.attachment(event_id="e2", message_id="m2", open_id="ou-2")
+        )
+        self.assertEqual(outsider, [])
+        self.assertEqual(len(self.downloads), 1)
+
+    def test_attachment_download_failure_replies_error_without_queueing(self) -> None:
+        def failing(_mid: str, _key: str, _kind: str, _dest: Path, _limit: int) -> None:
+            raise RuntimeError("boom")
+
+        router = MessageRouter(self.config, self.state, downloader=failing)
+        replies = router.handle(self.attachment())
+        self.assertIn("下载失败", replies[0])
+        self.assertIsNone(self.state.claimed_run())
+
+    def test_attachment_without_downloader_is_explained(self) -> None:
+        router = MessageRouter(self.config, self.state)
+        replies = router.handle(self.attachment())
+        self.assertIn("未启用附件下载", replies[0])
+
+
+class SendCommandTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.config = make_config(Path(self.temp.name), ("alpha",))
+        self.state = StateStore(self.config)
+        self.state.authorize("ou-1")
+        self.router = MessageRouter(self.config, self.state)
+        self.router.handle(inbound("/new alpha work", "e0", "m0"))
+
+    def tearDown(self) -> None:
+        self.state.close()
+        self.temp.cleanup()
+
+    def test_send_enqueues_image_and_file_outbox_entries(self) -> None:
+        project_path = self.config.projects["alpha"].path
+        (project_path / "plot.png").write_bytes(b"png")
+        (project_path / "report.pdf").write_bytes(b"pdf")
+
+        reply = self.router.handle(inbound("/send plot.png", "e1", "m1"))
+        self.assertIn("已排队发送图片", reply[0])
+        entry = self.state.next_outbox()
+        assert entry is not None
+        self.assertEqual(entry.kind, "image")
+        self.assertEqual(entry.file_path, str((project_path / "plot.png").resolve()))
+        self.state.mark_outbox_sent(entry.id)
+
+        reply = self.router.handle(inbound("/send report.pdf", "e2", "m2"))
+        self.assertIn("已排队发送文件", reply[0])
+        entry = self.state.next_outbox()
+        assert entry is not None
+        self.assertEqual(entry.kind, "file")
+        self.assertTrue(entry.file_path.endswith("report.pdf"))
+
+    def test_send_rejects_escape_missing_and_missing_task(self) -> None:
+        reply = self.router.handle(inbound("/send ../outside.txt", "e1", "m1"))
+        self.assertIn("无法发送该文件", reply[0])
+        reply = self.router.handle(inbound("/send missing.txt", "e2", "m2"))
+        self.assertIn("无法发送该文件", reply[0])
+        self.assertIsNone(self.state.next_outbox())
+
+        other = MessageRouter(self.config, self.state)
+        reply = other.handle(
+            InboundMessage("e3", "m3", "chat-2", "p2p", "ou-1", "/send plot.png")
+        )
+        self.assertIn("没有当前任务", reply[0])
+
+    def test_send_rejects_arguments_errors(self) -> None:
+        reply = self.router.handle(inbound("/send", "e1", "m1"))
+        self.assertIn("用法：/send", reply[0])
+
+
+class OutboxMediaMigrationTests(unittest.TestCase):
+    def test_outbox_gains_media_columns_and_text_still_works(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(Path(temp))
+            config.service.state_dir.mkdir(parents=True)
+            database = config.service.state_dir / "agent-message.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO outbox(chat_id, content, status, created_at) "
+                "VALUES ('chat-1', 'old text', 'pending', 'now')"
+            )
+            connection.commit()
+            connection.close()
+
+            state = StateStore(config)
+            try:
+                columns = {
+                    row["name"]
+                    for row in state._connection.execute("PRAGMA table_info(outbox)").fetchall()
+                }
+                self.assertIn("kind", columns)
+                self.assertIn("file_path", columns)
+                entry = state.next_outbox()
+                assert entry is not None
+                self.assertEqual(entry.kind, "text")
+                self.assertEqual(entry.content, "old text")
+            finally:
+                state.close()
+
+            # Reopening runs the migration again without errors or data loss.
+            reopened = StateStore(config)
+            try:
+                entry = reopened.next_outbox()
+                assert entry is not None
+                self.assertEqual(entry.content, "old text")
+            finally:
+                reopened.close()

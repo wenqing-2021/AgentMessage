@@ -106,6 +106,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - 普通文本继续当前任务；没有当前任务时，按默认项目的 `default_agent` 创建长期对话。
 - 服务重启时将未完成状态恢复为 interrupted，并通过 outbox 通知用户。
 - 回复先写入持久化 outbox，再异步发送；发送失败必须保留重试状态。
+- Agent 主动发送项目文件只能通过注入项目的 .agent-message/bin/send-to-feishu 脚本：脚本只写项目内 spool，由 bridge 用该项目最近一次会话完成上传，飞书凭证不进入 Agent 环境；/send 命令继续走 durable outbox，异步投递（kind 为 image/file 的 outbox 记录）只能由它产生。
 
 ## 安全边界
 

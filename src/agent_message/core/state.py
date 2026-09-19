@@ -170,6 +170,8 @@ class StateStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'text',
+                    file_path TEXT,
                     status TEXT NOT NULL,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
@@ -182,6 +184,8 @@ class StateStore:
             self._add_column_if_missing("task_messages", "operation", "TEXT NOT NULL DEFAULT 'message'")
             self._add_column_if_missing("tasks", "origin", "TEXT NOT NULL DEFAULT 'task'")
             self._add_column_if_missing("chat_context", "default_chat_task_id", "TEXT")
+            self._add_column_if_missing("outbox", "kind", "TEXT NOT NULL DEFAULT 'text'")
+            self._add_column_if_missing("outbox", "file_path", "TEXT")
             self._migrate_legacy_sandbox_jobs()
 
     def _migrate_legacy_sandbox_jobs(self) -> None:
@@ -549,6 +553,28 @@ class StateStore:
         with self._lock, self._connection:
             self._connection.execute("UPDATE runs SET pid = ? WHERE id = ?", (pid, run_id))
 
+    def last_chat_for_project(self, project_alias: str) -> tuple[str, str] | None:
+        """Return (chat_id, task_id) of the project's most recent run.
+
+        The transfer spool only carries a file path: the destination chat comes
+        from the project's own history, so an agent cannot address other chats.
+        """
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT t.chat_id AS chat_id, t.id AS task_id
+                FROM runs r
+                JOIN tasks t ON t.id = r.task_id
+                WHERE t.project_alias = ?
+                ORDER BY r.id DESC
+                LIMIT 1
+                """,
+                (project_alias,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["chat_id"]), str(row["task_id"])
+
     def set_task_session(self, task_id: str, session_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -913,19 +939,36 @@ class StateStore:
             )
             return [self._row_to_task(row) for row in rows]
 
-    def enqueue_outbox(self, chat_id: str, content: str) -> None:
+    def enqueue_outbox(
+        self,
+        chat_id: str,
+        content: str,
+        *,
+        kind: str = "text",
+        file_path: str | None = None,
+    ) -> None:
+        if kind not in {"text", "image", "file"}:
+            raise ValueError("Unknown outbox kind")
+        if kind != "text" and not file_path:
+            raise ValueError("Media outbox entries require file_path")
         with self._lock, self._connection:
             self._connection.execute(
-                "INSERT INTO outbox(chat_id, content, status, created_at) VALUES (?, ?, 'pending', ?)",
-                (chat_id, content, _now()),
+                "INSERT INTO outbox(chat_id, content, kind, file_path, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'pending', ?)",
+                (chat_id, content, kind, file_path, _now()),
             )
 
     def next_outbox(self) -> OutboxMessage | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT id, chat_id, content FROM outbox WHERE status = 'pending' ORDER BY id LIMIT 1"
+                "SELECT id, chat_id, content, kind, file_path FROM outbox "
+                "WHERE status = 'pending' ORDER BY id LIMIT 1"
             ).fetchone()
-            return OutboxMessage(int(row["id"]), row["chat_id"], row["content"]) if row else None
+            if row is None:
+                return None
+            return OutboxMessage(
+                int(row["id"]), row["chat_id"], row["content"], row["kind"], row["file_path"]
+            )
 
     def mark_outbox_sent(self, outbox_id: int) -> None:
         with self._lock, self._connection:
@@ -934,10 +977,23 @@ class StateStore:
                 (_now(), outbox_id),
             )
 
-    def mark_outbox_failed(self, outbox_id: int, error: str) -> None:
+    def mark_outbox_failed(self, outbox_id: int, error: str) -> int:
+        """Record a failed attempt and return the new attempt count."""
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?",
+                (error[:500], outbox_id),
+            )
+            row = self._connection.execute(
+                "SELECT attempts FROM outbox WHERE id = ?", (outbox_id,)
+            ).fetchone()
+        return int(row["attempts"]) if row is not None else 0
+
+    def mark_outbox_terminal(self, outbox_id: int, error: str) -> None:
+        """Give up on an outbox entry that can never succeed (e.g. the file is gone)."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE outbox SET status = 'failed', last_error = ? WHERE id = ?",
                 (error[:500], outbox_id),
             )
 
