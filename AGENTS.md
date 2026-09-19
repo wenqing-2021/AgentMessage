@@ -56,7 +56,7 @@ src/agent_message/
 └── cli.py                   # 本地统一命令行入口
 ```
 
-仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成：`deploy/` 存放 systemd 模板，本体 unit 模板含占位符并由 `install.sh` 渲染，SSH agent unit、drop-in 与 `scripts/load_ssh_keys.py` 也由它在 service 阶段默认安装并启用；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；Bubblewrap 沙箱等较长的用户文档放在 `assets/docs/`。
+仓库根目录的 `install.sh` 负责 HTTPS 安装、凭证断点录入和 systemd 用户服务生成：`deploy/` 存放 systemd 模板，本体 unit 模板含占位符并由 `install.sh` 渲染，SSH agent unit、drop-in 与 `scripts/load_ssh_keys.py` 也由它在 service 阶段默认安装并启用；`update.sh` 负责一键更新（拉取代码、`uv sync --frozen`、`deploy/` 中的 service 有改动时执行 `install.sh --refresh-service`，最后只重启 SSH agent 与本体服务并提示解锁有口令私钥）；`uninstall.sh` 在二次确认后卸载，并可先备份本地数据；Bubblewrap 沙箱等较长的用户文档放在 `assets/docs/`。
 
 保持以下依赖方向：
 
@@ -209,6 +209,9 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - `tests/test_scheduler.py`：claim、并发、进度、恢复和停止信号。
 - `tests/test_adapters.py`：Codex/Qoder argv、session、MCP 注入和 JSON 流解析。
 - `tests/test_feishu.py`：飞书事件规范化；不连接真实飞书。
+- `tests/test_transfer.py`：注入项目的 send-to-feishu 脚本与 spool 投递；`tests/test_media.py`：路径/大小校验与附件分类。
+- `tests/test_service.py`：outbox 失败重试上限、跳过通知与队列推进。
+- `tests/test_update_script.py`：update.sh 的拉取、依赖同步、unit 刷新判定与两条重启命令。
 - `tests/test_sandbox_runner.py`：Bubblewrap 命令、GPU 透传开关、隔离路径、作业迁移和 sandbox MCP。
 - `tests/test_container_runner.py`：Docker inspect、bind mount、命令、停止和 Container MCP。
 - `tests/test_cli.py`：doctor、selector、沙箱探针和本地 resume。

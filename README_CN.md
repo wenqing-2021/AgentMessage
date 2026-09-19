@@ -229,13 +229,15 @@ uv run agent-message tasks
 ```bash
 cd ~/workspace/AgentMessage
 
-# Python、projects.toml 或 feishu.env 有变化
-systemctl --user restart agent-message
+# 代码更新：拉取代码、同步依赖、重启两个服务，并打印服务状态与已加载密钥
+bash update.sh
 
-# pyproject.toml 或 uv.lock 有变化
-uv sync --frozen
-systemctl --user restart agent-message
-
-# systemd unit 有变化
+# deploy/ 中的 service 有改动时（update.sh 会自动判断并执行）
 bash install.sh --refresh-service
+
+# 只改了 config/projects.toml 或 feishu.env
+systemctl --user restart agent-message
+
+# 需要更完整的检查（配置、Agent CLI、沙箱、Docker）时
+uv run agent-message doctor
 ```

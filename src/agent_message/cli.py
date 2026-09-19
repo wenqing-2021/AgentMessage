@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -84,9 +85,59 @@ def _version(command: str) -> str:
     return output[0] if output else f"已找到：{path}"
 
 
-def _command_output(command: list[str]) -> tuple[int, str]:
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+def _command_output(
+    command: list[str], env: dict[str, str] | None = None
+) -> tuple[int, str]:
+    completed = subprocess.run(
+        command, capture_output=True, text=True, timeout=15, check=False, env=env
+    )
     return completed.returncode, (completed.stdout + completed.stderr)
+
+
+_SERVICE_UNITS = ("agent-message.service", "agent-message-ssh-agent.service")
+_SERVICE_LABELS = ("本体", "SSH agent")
+_KNOWN_UNIT_STATES = frozenset(
+    {"active", "activating", "deactivating", "inactive", "failed", "reloading", "unknown"}
+)
+_SSH_AGENT_SOCKET = Path("agent-message-ssh") / "agent.sock"
+
+
+def _runtime_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+
+
+def _systemd_user_services() -> tuple[str, list[str]]:
+    """Describe the bridge and SSH agent units; the second item lists inactive ones."""
+    try:
+        _, output = _command_output(["systemctl", "--user", "is-active", *_SERVICE_UNITS])
+    except (OSError, subprocess.TimeoutExpired):
+        return "无法确认（systemctl 不可用）", []
+    states = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(states) != len(_SERVICE_UNITS) or any(
+        state not in _KNOWN_UNIT_STATES for state in states
+    ):
+        return "无法确认（systemctl --user 不可用）", []
+    summary = "，".join(f"{label} {state}" for label, state in zip(_SERVICE_LABELS, states))
+    inactive = [unit for unit, state in zip(_SERVICE_UNITS, states) if state != "active"]
+    return summary, inactive
+
+
+def _ssh_agent_keys() -> str:
+    """Report how many keys the dedicated SSH agent currently holds."""
+    environment = {
+        **os.environ,
+        "SSH_AUTH_SOCK": str(_runtime_dir() / _SSH_AGENT_SOCKET),
+    }
+    try:
+        code, output = _command_output(["ssh-add", "-l"], env=environment)
+    except (OSError, subprocess.TimeoutExpired):
+        return "无法确认（ssh-add 不可用）"
+    if code == 0:
+        loaded = len([line for line in output.splitlines() if line.strip()])
+        return f"已加载 {loaded} 把"
+    if code == 1:
+        return "未加载密钥（有口令的私钥需手动 ssh-add 解锁）"
+    return "无法确认（SSH agent 未就绪）"
 
 
 def _qoder_login_status() -> bool | None:
@@ -407,6 +458,11 @@ def command_doctor(
         "飞书凭证："
         + ("已设置" if config.app_id and config.app_secret else "缺失（仅 run 命令需要）")
     )
+    services, inactive_services = _systemd_user_services()
+    print(f"systemd 用户服务：{services}")
+    if inactive_services:
+        print(f"  重启：systemctl --user restart {' '.join(inactive_services)}")
+    print(f"专用 SSH agent 密钥：{_ssh_agent_keys()}")
     if not CodexAdapter().available():
         print("警告：Codex 未启用。")
     print(f"Bubblewrap：{_version('bwrap')}")

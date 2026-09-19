@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent_message.cli import (
+    _ssh_agent_keys,
+    _systemd_user_services,
     _container_project_for_selector,
     _qoder_login_status,
     command_resume,
@@ -19,6 +21,54 @@ from tests.helpers import make_config
 
 
 class CliTests(unittest.TestCase):
+    def test_systemd_service_summary_reports_inactive_units(self) -> None:
+        with patch("agent_message.cli._command_output", return_value=(0, "active\nactive\n")):
+            summary, inactive = _systemd_user_services()
+        self.assertEqual(summary, "本体 active，SSH agent active")
+        self.assertEqual(inactive, [])
+
+        with patch(
+            "agent_message.cli._command_output",
+            return_value=(3, "active\ninactive\n"),
+        ):
+            summary, inactive = _systemd_user_services()
+        self.assertIn("SSH agent inactive", summary)
+        self.assertEqual(inactive, ["agent-message-ssh-agent.service"])
+
+    def test_systemd_service_summary_degrades_when_bus_is_unreachable(self) -> None:
+        with patch(
+            "agent_message.cli._command_output",
+            return_value=(1, "Failed to connect to bus: Operation not permitted\n"),
+        ):
+            summary, inactive = _systemd_user_services()
+        self.assertIn("无法确认", summary)
+        self.assertEqual(inactive, [])
+
+    def test_ssh_agent_keys_counts_loaded_keys_and_reports_empty_agent(self) -> None:
+        with patch(
+            "agent_message.cli._command_output",
+            return_value=(0, "256 SHA256:aaa one (ED25519)\n3072 SHA256:bbb two (RSA)\n"),
+        ):
+            self.assertEqual(_ssh_agent_keys(), "已加载 2 把")
+
+        with patch(
+            "agent_message.cli._command_output",
+            return_value=(1, "The agent has no identities.\n"),
+        ):
+            self.assertIn("未加载密钥", _ssh_agent_keys())
+
+        with patch(
+            "agent_message.cli._command_output",
+            return_value=(2, "Error connecting to agent: No such file or directory\n"),
+        ):
+            self.assertIn("无法确认", _ssh_agent_keys())
+
+    def test_ssh_agent_keys_uses_the_dedicated_socket(self) -> None:
+        with patch("agent_message.cli._command_output", return_value=(0, "key\n")) as probe:
+            _ssh_agent_keys()
+        environment = probe.call_args.kwargs["env"]
+        self.assertTrue(environment["SSH_AUTH_SOCK"].endswith("/agent-message-ssh/agent.sock"))
+
     def test_qoder_login_status_returns_only_boolean(self) -> None:
         payload = (
             '{"logged_in":true,"username":"private name",'

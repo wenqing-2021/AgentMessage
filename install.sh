@@ -413,6 +413,7 @@ Next:
   3. Send /help to the Feishu bot, then authorize yourself with:
        cd "$INSTALL_DIR" && uv run agent-message pending-senders
        cd "$INSTALL_DIR" && uv run agent-message authorize ou_xxx
+  4. Update later with: cd "$INSTALL_DIR" && bash update.sh
 EOF
 }
 
