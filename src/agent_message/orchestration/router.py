@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
+from ..agents.codex_sessions import CodexSessionStore
 from ..agents.model_catalog import (
     REASONING_EFFORTS, configured_codex_model, configured_reasoning_effort, list_codex_models,
 )
@@ -166,6 +169,26 @@ class MessageRouter:
         return [f"{prefix}任务 {updated.id}。"]
 
     def _simple(self, message: InboundMessage, command: SimpleCommand) -> list[str]:
+        if command.name == "list":
+            task = self.state.selected_task(message.chat_id, message.sender_open_id)
+            alias = task.project_alias if task else self.config.service.default_chat_project
+            project = self.config.projects.get(alias)
+            if project is None:
+                return ["当前项目未配置。"]
+            try:
+                codex = CodexSessionStore(Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser())
+                titles = codex.list_chat_titles(project.path, limit=5)
+            except (OSError, ValueError, sqlite3.Error):
+                LOGGER.exception("Cannot list Codex Chats for project %s", alias)
+                return ["暂时无法读取 Codex Chats，请稍后重试。"]
+            return ["\n".join(f"{index}. {title}" for index, title in enumerate(titles, 1))
+                    or "当前项目没有未归档的 Codex Chats。"]
+        if command.name == "history":
+            task = self.state.get_task(command.task_id or "", message.chat_id)
+            if task is None or task.owner_open_id != message.sender_open_id:
+                return ["找不到该任务 ID。"]
+            history = self.state.session_history(task.id)
+            return ["\n".join(history) if history else "没有同步的对话记录。"]
         if command.name == "help":
             return [HELP_TEXT]
         if command.name == "model":

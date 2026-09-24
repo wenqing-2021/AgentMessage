@@ -9,10 +9,15 @@ import signal
 from collections.abc import Awaitable, Callable
 
 from ..agents.adapters import adapter_for
+from .sync_spool import SyncSpoolWatcher
 from ..core.config import AppConfig
 from ..core.models import AgentResult, ClaimedRun, ContainerJob
 from ..core.state import StateStore
 from ..core.transfer import ensure_send_script
+from ..core.session_sync import install_sync_scripts, install_chat_list
+from ..agents.codex_sessions import CodexSessionStore
+from pathlib import Path
+import sqlite3
 from ..runtimes.container.runner import terminate_container_process
 
 
@@ -65,6 +70,18 @@ class Scheduler:
         # Agents send files by running the injected project script; refresh it here
         # so long-lived projects pick up script updates with their next run.
         ensure_send_script(claimed.project_path)
+        try:
+            token = self.state.register_agent_sync(claimed.run_id)
+            install_sync_scripts(claimed.project_path, token)
+            try:
+                codex = CodexSessionStore(Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser())
+                titles = codex.list_chat_titles(claimed.project_path)
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                install_chat_list(claimed.project_path, token, [], str(exc))
+            else:
+                install_chat_list(claimed.project_path, token, titles)
+        except (OSError, ValueError) as exc:
+            await self._send(claimed.chat_id, f"无法安装会话同步脚本：{exc}")
         adapter = adapter_for(
             claimed.agent,
             codex_tool_network=self.config.service.codex_tool_network,
@@ -106,6 +123,7 @@ class Scheduler:
         finally:
             sandbox_monitor_stop.set()
             await asyncio.gather(sandbox_monitor, container_monitor)
+        SyncSpoolWatcher(self.state).capture_run(claimed.run_id)
         task = self.state.finish_run(
             run_id=claimed.run_id,
             task_id=claimed.task_id,

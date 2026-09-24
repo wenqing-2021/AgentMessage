@@ -71,6 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _config_argument(resume)
     resume.add_argument("task_id")
+    for direction in ("sync-feishu-to-codex", "sync-codex-to-feishu"):
+        child = subcommands.add_parser(direction, help="sync an idle, non-archived Codex session")
+        child.add_argument("--config", default="config/projects.toml", help=argparse.SUPPRESS)
+        child.add_argument("session", metavar="TASK_ID" if direction == "sync-feishu-to-codex" else "TITLE",
+                           help="Feishu task ID" if direction == "sync-feishu-to-codex" else "Codex Chats title (full or partial)")
+        child.add_argument("--codex-home", type=Path,
+                           default=Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser(), help=argparse.SUPPRESS)
+        if direction == "sync-codex-to-feishu":
+            child.add_argument("--target-task", help=argparse.SUPPRESS)
     return parser
 
 
@@ -574,9 +583,40 @@ async def _run_service(config: AppConfig) -> None:
     await run_feishu_bridge(config)
 
 
+def _choose_sync_target(prompt: str, labels: list[str]) -> int:
+    print(prompt + "：")
+    for index, label in enumerate(labels, 1):
+        print(f"{index}. {label}")
+    if not sys.stdin.isatty():
+        raise ValueError("存在多个匹配项，请在交互式终端运行同一命令并选择编号。")
+    try:
+        return int(input("输入编号（留空取消）：").strip()) - 1
+    except (ValueError, EOFError) as exc:
+        raise ValueError("已取消同步。") from exc
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
+        if args.command in {"sync-feishu-to-codex", "sync-codex-to-feishu"}:
+            from .agents.codex_sessions import CodexSessionStore
+            from .orchestration.session_sync import sync_codex_to_feishu, sync_feishu_to_codex
+            import sqlite3
+
+            state = StateStore(load_config(args.config))
+            try:
+                codex = CodexSessionStore(args.codex_home)
+                if args.command == "sync-feishu-to-codex":
+                    print(sync_feishu_to_codex(state, codex, args.session))
+                else:
+                    print(sync_codex_to_feishu(state, codex, args.session, args.target_task,
+                                              choose=_choose_sync_target))
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                print(f"同步失败：{exc}", file=sys.stderr)
+                raise SystemExit(2) from exc
+            finally:
+                state.close()
+            return
         if args.command == "doctor":
             raise SystemExit(command_doctor(args.config, args.sandbox_project, args.container))
         if args.command == "tasks":
@@ -597,6 +637,14 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2) from exc
     except KeyboardInterrupt:
         print("已停止。", file=sys.stderr)
+
+
+def sync_feishu_to_codex_main() -> None:
+    main(["sync-feishu-to-codex", *sys.argv[1:]])
+
+
+def sync_codex_to_feishu_main() -> None:
+    main(["sync-codex-to-feishu", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

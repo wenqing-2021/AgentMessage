@@ -241,3 +241,15 @@ systemctl --user restart agent-message
 # 需要更完整的检查（配置、Agent CLI、沙箱、Docker）时
 uv run agent-message doctor
 ```
+
+### 飞书与 Codex Chats 会话同步
+
+在仓库目录运行以下两个命令即可，无需查找 Codex UUID：
+
+```bash
+uv run sync-feishu-to-codex <飞书任务ID>
+uv run sync-codex-to-feishu "Chats 中的对话标题"
+```
+
+飞书 `/list` 只显示当前项目最新创建的 5 个未归档 Codex Chats 标题；当前任务 ID 用 `/status` 查看，同步支持完整或部分标题。
+可直接问 Agent“列出当前项目最近 5 个 Codex Chats 标题”，无需 UUID；也可让 Agent“把当前对话同步到 Codex”或“把 Chats 里的《标题》同步到飞书”；bridge 在本轮结束后执行并通知结果，导入后用 `/use <任务ID>` 继续。

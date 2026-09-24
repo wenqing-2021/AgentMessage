@@ -11,6 +11,7 @@ from .commands import SimpleCommand, parse_command
 from .router import MessageRouter
 from .scheduler import Scheduler
 from .spool import SpoolWatcher
+from .sync_spool import SyncSpoolWatcher
 from ..channels.feishu import FeishuError, FeishuGateway
 from ..core.config import AppConfig
 from ..core.models import InboundMessage, OutboxMessage
@@ -151,19 +152,22 @@ class BridgeService:
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
+        for run_id in self.state.unfinished_agent_sync_runs():
+            SyncSpoolWatcher(self.state).capture_run(run_id)
         interrupted = self.state.recover_interrupted()
         for task in interrupted:
             self.state.enqueue_outbox(task.chat_id, f"任务 {task.id} 因服务重启而中断；发送普通文本可恢复会话。")
         self._outbox_wake.set()
         outbox_task = asyncio.create_task(self._outbox_loop(), name="agent-message-outbox")
         scheduler_task = asyncio.create_task(self.scheduler.run(), name="agent-message-scheduler")
+        sync_task = asyncio.create_task(SyncSpoolWatcher(self.state).run(), name="agent-message-sync")
         watcher_task = (
             asyncio.create_task(self.watcher.run(), name="agent-message-spool")
             if self.watcher is not None
             else None
         )
         try:
-            tasks = [outbox_task, scheduler_task] + ([watcher_task] if watcher_task else [])
+            tasks = [outbox_task, scheduler_task, sync_task] + ([watcher_task] if watcher_task else [])
             await asyncio.gather(*tasks)
         finally:
             self._closing = True
@@ -172,11 +176,13 @@ class BridgeService:
             await self.scheduler.shutdown()
             outbox_task.cancel()
             scheduler_task.cancel()
+            sync_task.cancel()
             if watcher_task is not None:
                 watcher_task.cancel()
             await asyncio.gather(
                 outbox_task,
                 scheduler_task,
+                sync_task,
                 *([watcher_task] if watcher_task is not None else []),
                 return_exceptions=True,
             )

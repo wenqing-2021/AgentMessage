@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from ..core.models import AgentKind, AgentResult, ClaimedRun, Task
+from ..core.session_sync import SYNC_HINT
 
 
 PidCallback = Callable[[int], Awaitable[None] | None]
@@ -34,7 +35,7 @@ FILE_SEND_HINT = (
     "失败时请把原因告诉用户。只允许项目内文件，图片不超过 10MB，其他文件不超过 30MB；"
     "需要发送多个文件时逐个调用。若本项目要求通过 sandbox_run 或 container_run "
     "执行项目命令，请用同样的方式调用该脚本。"
-)
+) + SYNC_HINT
 
 
 class AdapterError(RuntimeError):

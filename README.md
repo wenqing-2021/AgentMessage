@@ -241,3 +241,14 @@ systemctl --user restart agent-message
 # For a fuller check (configuration, agent CLIs, sandbox, Docker)
 uv run agent-message doctor
 ```
+
+### Synchronize Feishu and Codex Chats sessions
+
+Run these two commands from the repository directory. No Codex UUID lookup is needed:
+
+```bash
+uv run sync-feishu-to-codex <feishu-task-id>
+uv run sync-codex-to-feishu "Title shown in Chats"
+```
+
+Feishu `/list` shows the current project’s 5 newest unarchived Codex Chats titles.

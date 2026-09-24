@@ -7,9 +7,10 @@ import shlex
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from .config import AppConfig
 from .models import (
@@ -179,6 +180,23 @@ class StateStore:
                     sent_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, id);
+                CREATE TABLE IF NOT EXISTS session_transcripts (
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+                    content TEXT NOT NULL,
+                    PRIMARY KEY(task_id, position)
+                );
+                CREATE TABLE IF NOT EXISTS agent_sync_contexts (
+                    run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+                    token TEXT UNIQUE NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS agent_sync_requests (
+                    key TEXT PRIMARY KEY,
+                    run_id INTEGER NOT NULL REFERENCES agent_sync_contexts(run_id),
+                    payload TEXT NOT NULL,
+                    result TEXT
+                );
                 """
             )
             self._add_column_if_missing("task_messages", "operation", "TEXT NOT NULL DEFAULT 'message'")
@@ -460,6 +478,124 @@ class StateStore:
             else:
                 rows = self._connection.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
             return [self._row_to_task(row) for row in rows]
+
+    def import_codex_session(
+        self, *, session_id: str, project_alias: str, target_task_id: str,
+        title: str, transcript: list[tuple[str, str]],
+    ) -> Task:
+        """Attach an idle session to an existing authorized Feishu destination.
+
+        History is a snapshot, never queued work or an outbound message. The
+        write lock also serializes separate CLI processes importing this UUID.
+        """
+        with self._lock, self._connection:
+            self._connection.execute('BEGIN IMMEDIATE')
+            target = self.get_task(target_task_id)
+            if target is None or not self.is_authorized(target.owner_open_id):
+                raise ValueError('目标任务不存在或其用户尚未授权。')
+            project = self.config.projects.get(project_alias)
+            if project is None or AgentKind.CODEX not in project.allowed_agents:
+                raise ValueError('目标项目不允许 Codex。')
+            rows = self._connection.execute(
+                "SELECT * FROM tasks WHERE session_id=? AND agent='codex'", (session_id,)
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError('此 session 已关联多个任务，请先处理重复关联。')
+            if rows:
+                task = self._row_to_task(rows[0])
+                if (task.chat_id, task.owner_open_id, task.project_alias) != (
+                    target.chat_id, target.owner_open_id, project_alias
+                ):
+                    raise ValueError('session 已关联其他飞书会话、用户或项目。')
+                if task.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                    raise ValueError('飞书任务正在运行或排队，请等待完成。')
+                task_id = task.id
+            else:
+                task_id = _task_id()
+                timestamp = _now()
+                self._connection.execute(
+                    '''INSERT INTO tasks(id, project_alias, agent, chat_id, owner_open_id,
+                       origin, status, session_id, created_at, updated_at, last_summary)
+                       VALUES (?, ?, 'codex', ?, ?, 'task', 'succeeded', ?, ?, ?, ?)''',
+                    (task_id, project_alias, target.chat_id, target.owner_open_id,
+                     session_id, timestamp, timestamp, title),
+                )
+            self._connection.execute('DELETE FROM session_transcripts WHERE task_id=?', (task_id,))
+            self._connection.executemany(
+                'INSERT INTO session_transcripts(task_id, position, role, content) VALUES (?, ?, ?, ?)',
+                [(task_id, index, role, content) for index, (role, content) in enumerate(transcript)],
+            )
+            row = self._connection.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            return self._row_to_task(row)
+
+    @contextmanager
+    def idle_task_for_sync(self, task_id: str) -> Iterator[Task]:
+        """Prevent bridge queueing/claiming while exporting session metadata."""
+        with self._lock, self._connection:
+            self._connection.execute('BEGIN IMMEDIATE')
+            task = self.get_task(task_id)
+            if task is None or task.status in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                raise ValueError('任务不存在、正在运行或排队，请等待完成后同步。')
+            yield task
+
+    def session_history(self, task_id: str, limit: int = 20) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                '''SELECT role, content FROM session_transcripts WHERE task_id=?
+                   ORDER BY position DESC LIMIT ?''', (task_id, limit)
+            ).fetchall()
+            return [f"{row['role']}: {row['content']}" for row in reversed(rows)]
+
+    def register_agent_sync(self, run_id: int) -> str:
+        with self._lock, self._connection:
+            self._connection.execute(
+                'INSERT OR IGNORE INTO agent_sync_contexts VALUES (?, ?)', (run_id, uuid.uuid4().hex)
+            )
+            return self._connection.execute(
+                'SELECT token FROM agent_sync_contexts WHERE run_id=?', (run_id,)
+            ).fetchone()['token']
+
+    def agent_sync_context(self, run_id: int) -> tuple[str, Task] | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT s.token, t.* FROM agent_sync_contexts s JOIN runs r ON r.id=s.run_id "
+                "JOIN tasks t ON t.id=r.task_id WHERE s.run_id=?", (run_id,)
+            ).fetchone()
+            return (row['token'], self._row_to_task(row)) if row else None
+
+    def unfinished_agent_sync_runs(self) -> list[int]:
+        with self._lock:
+            return [row[0] for row in self._connection.execute(
+                "SELECT s.run_id FROM agent_sync_contexts s JOIN runs r ON r.id=s.run_id WHERE r.status='running'"
+            )]
+
+    def save_agent_sync_request(self, run_id: int, key: str, payload: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                'INSERT OR IGNORE INTO agent_sync_requests(key, run_id, payload) VALUES (?, ?, ?)',
+                (key, run_id, payload),
+            )
+
+    def pending_agent_sync_requests(self) -> list[tuple[str, str, Task]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT s.key, s.payload, t.* FROM agent_sync_requests s "
+                "JOIN runs r ON r.id=s.run_id JOIN tasks t ON t.id=r.task_id "
+                "WHERE s.result IS NULL AND r.status != 'running' AND t.status NOT IN ('running', 'queued')"
+            ).fetchall()
+            return [(row['key'], row['payload'], self._row_to_task(row)) for row in rows]
+
+    def finish_agent_sync(self, key: str, chat_id: str, message: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute('BEGIN IMMEDIATE')
+            cursor = self._connection.execute(
+                'UPDATE agent_sync_requests SET result=? WHERE key=? AND result IS NULL', (message, key)
+            )
+            if cursor.rowcount:
+                self._connection.execute(
+                    "INSERT INTO outbox(chat_id, content, status, created_at) VALUES (?, ?, 'pending', ?)",
+                    (chat_id, message, _now()),
+                )
 
     def stop_task(self, task_id: str, owner_open_id: str) -> Task | None:
         with self._lock, self._connection:

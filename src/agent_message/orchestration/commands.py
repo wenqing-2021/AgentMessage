@@ -22,7 +22,7 @@ class NewTaskCommand:
 
 @dataclass(frozen=True)
 class SimpleCommand:
-    name: Literal["use", "status", "stop", "logs", "chat", "model", "compact", "send", "help"]
+    name: Literal["use", "status", "stop", "logs", "chat", "model", "compact", "send", "help", "list", "history"]
     task_id: str | None = None
     log_lines: int | None = None
     log_source: Literal["agent", "sandbox", "container"] = "agent"
@@ -60,6 +60,10 @@ HELP_TEXT = """先认识 4 个概念：
 /compact
 → 压缩当前 Codex session 上下文，保留会话；若正在运行则排队。
 /status 或 /status a1b2c3d4
+/list
+→ 仅显示当前项目最新创建的 5 个未归档 Codex Chats 标题。
+/history a1b2c3d4
+→ 查看该任务最近一次同步的对话记录（最近 20 条）。
 /logs a1b2c3d4 50
 /logs a1b2c3d4 50 sandbox
 /logs a1b2c3d4 50 container
@@ -82,6 +86,14 @@ def parse_command(text: str) -> ParsedCommand:
     if not parts:
         raise CommandError("空命令。")
     command = parts[0].lower()
+    if command == "/list":
+        if len(parts) != 1:
+            raise CommandError("用法：/list")
+        return SimpleCommand("list")
+    if command == "/history":
+        if len(parts) != 2:
+            raise CommandError("用法：/history <任务ID>")
+        return SimpleCommand("history", task_id=parts[1])
     if command == "/help":
         if len(parts) != 1:
             raise CommandError("/help 不接收参数。")
