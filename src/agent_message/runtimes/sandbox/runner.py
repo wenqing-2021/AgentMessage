@@ -160,6 +160,17 @@ def build_bwrap_command(
         for source in (Path("/etc/hosts"), Path("/etc/resolv.conf")):
             _append_readonly_if_present(command, created, source)
 
+    # Host applications installed outside /usr stay invisible unless the operator
+    # lists them in [service].sandbox_readonly_paths. A configured path that
+    # disappeared on the host fails the build, so the problem stays visible
+    # instead of degrading into a bare "command not found".
+    for source in sandbox.readonly_paths:
+        if not source.exists():
+            raise SandboxRunnerError(
+                f"sandbox_readonly_paths entry is not available on the host: {source}"
+            )
+        _append_readonly_if_present(command, created, source)
+
     command.extend(["--proc", "/proc", "--dev", "/dev"])
     created.update({Path("/proc"), Path("/dev")})
     if gpu_enabled:

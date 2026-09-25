@@ -92,7 +92,7 @@ allowed_agents = ["codex", "qoder"]
 - `default_agent` must be present in `allowed_agents`; Codex-only, Qoder-only, and mixed projects are supported.
 - Ordinary Codex tools can use the network only when `codex_tool_network = true`; ordinary Qoder Bash commands can use the network by default.
 - See [`config/projects.example.toml`](config/projects.example.toml) for all common fields.
-- See [Bubblewrap sandbox](assets/docs/sandbox-bubblewrap.en.md) for isolated execution, Git writes, and optional GPU/CUDA/JAX access.
+- See [Bubblewrap sandbox](assets/docs/sandbox-bubblewrap.en.md) for isolated execution, Git writes, optional GPU/CUDA/JAX access, and exposing host tools through `[service].sandbox_readonly_paths`.
 
 Use the restart commands at the end of this README after changing the configuration.
 

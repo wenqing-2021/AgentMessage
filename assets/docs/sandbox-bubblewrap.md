@@ -33,6 +33,7 @@ sandbox_timeout_seconds = 86400
 - `sandbox_enabled` 打开沙箱；`sandbox_gpu` 只在需要 CUDA/JAX 时设为 `true`，此时才挂载 `/dev/dxg` 并加入 WSL CUDA 库路径。
 - `sandbox_network` 省略时默认为 `true`；设为 `false` 会隔离沙箱命令的网络。
 - 同一个项目不能同时启用 Bubblewrap 沙箱与 Docker container runner。
+- `[service].sandbox_readonly_paths` 是全局白名单，把 `/usr` 之外的宿主工具只读暴露给所有启用沙箱的项目，例如 `sandbox_readonly_paths = ["/opt/quarto", "/etc/fonts"]`；条目必须是宿主上真实存在的绝对路径，缺失时该项目所有沙箱命令都会报错，且应填安装根目录而不是 `/usr/local/bin` 中的符号链接。
 - 旧键 `gpu_enabled`、`gpu_network`、`gpu_timeout_seconds` 和 `[projects.<alias>.gpu]` 表仍可读取，等价于 `sandbox_enabled = true` 加 `sandbox_gpu = true`；不要与新键混用。
 - 修改配置后需要重启 AgentMessage。
 
@@ -155,7 +156,7 @@ SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/agent-message-ssh/agent.sock" ssh-add -l
 
 ## 安全边界
 
-- 沙箱只挂载当前项目和必要系统文件；启用 `sandbox_gpu` 时才额外挂载 `/dev/dxg`。
+- 沙箱只挂载当前项目和必要系统文件：整个 `/usr` 只读可见，`[service].sandbox_readonly_paths` 列出的宿主路径按只读挂载（例如 `/opt/quarto`、`/etc/fonts`）；启用 `sandbox_gpu` 时才额外挂载 `/dev/dxg`。
 - 项目及其内部 `.git` 可写，Git 写操作通过 `sandbox_run` 执行。不会额外挂载项目外的 worktree Git 元数据或私钥；仅在显式配置时挂载 SSH agent socket 和 known_hosts，远程操作受网络配置限制。
 - 宿主 HOME、Windows 目录、其他项目、飞书凭证和 AgentMessage 数据库不可见。
 - Bubblewrap 使用 `--clearenv`，沙箱命令不会继承飞书服务环境变量。

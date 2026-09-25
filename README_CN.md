@@ -92,7 +92,7 @@ allowed_agents = ["codex", "qoder"]
 - `default_agent` 必须包含在 `allowed_agents` 中，支持 Codex-only、Qoder-only 或二者并存。
 - `codex_tool_network = true` 才会允许普通 Codex 工具联网；Qoder 普通 Bash 默认可以联网。
 - 完整字段见 [`config/projects.example.toml`](config/projects.example.toml)。
-- 隔离执行、Git 写入和可选 GPU/CUDA/JAX 见 [Bubblewrap 沙箱指南](assets/docs/sandbox-bubblewrap.md)。
+- 隔离执行、Git 写入、可选 GPU/CUDA/JAX，以及用 `[service].sandbox_readonly_paths` 把宿主工具只读暴露给沙箱，见 [Bubblewrap 沙箱指南](assets/docs/sandbox-bubblewrap.md)。
 
 修改配置后使用 README 最后的重启命令。
 

@@ -119,6 +119,43 @@ class SandboxRunnerTests(unittest.TestCase):
             self.assertNotIn("GPU passthrough", sandbox_instructions(False))
             self.assertIn("GPU passthrough", sandbox_instructions(True))
 
+    def test_configured_host_paths_are_mounted_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            project = make_config(root, sandbox_projects=("alpha",)).projects["alpha"]
+            toolchain = root / "toolchain"
+            toolchain.mkdir()
+            fonts = root / "fonts"
+            fonts.mkdir()
+            configured = replace(
+                project, sandbox=replace(project.sandbox, readonly_paths=(toolchain, fonts))
+            )
+
+            def build(target):
+                return build_bwrap_command(
+                    target,
+                    ["/usr/bin/true"],
+                    bwrap_path="/usr/bin/bwrap",
+                    uv_path="/usr/bin/true",
+                )
+
+            command = build(configured)
+            for source in (toolchain, fonts):
+                index = command.index(str(source))
+                self.assertEqual(
+                    command[index - 1 : index + 2], ["--ro-bind", str(source), str(source)]
+                )
+            # Host toolchains stay hidden unless the operator lists them.
+            self.assertNotIn("/opt/quarto", command)
+            self.assertNotIn("/etc/fonts", command)
+
+            broken = replace(
+                configured,
+                sandbox=replace(configured.sandbox, readonly_paths=(toolchain, root / "gone")),
+            )
+            with self.assertRaisesRegex(SandboxRunnerError, "not available on the host"):
+                build(broken)
+
     def test_network_can_only_be_enabled_by_project_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = make_config(Path(temp), sandbox_gpu_projects=("alpha",))

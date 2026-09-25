@@ -30,6 +30,7 @@ class SandboxConfig:
     git_user_email: str | None = None
     ssh_agent_socket: Path | None = None
     ssh_known_hosts: Path | None = None
+    readonly_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class ServiceConfig:
     sandbox_git_user_email: str | None = None
     sandbox_ssh_agent_socket: Path | None = None
     sandbox_ssh_known_hosts: Path | None = None
+    sandbox_readonly_paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -145,6 +147,42 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError(
             "[service] requires both sandbox_ssh_agent_socket and sandbox_ssh_known_hosts"
         )
+
+    readonly_paths: tuple[Path, ...] = ()
+    raw_readonly_paths = service_raw.get("sandbox_readonly_paths")
+    if raw_readonly_paths is not None:
+        if not isinstance(raw_readonly_paths, list):
+            raise ConfigError(
+                "[service].sandbox_readonly_paths must be an array of absolute paths"
+            )
+        service_home = Path.home().resolve()
+        collected: list[Path] = []
+        for entry in raw_readonly_paths:
+            if (not isinstance(entry, str) or not entry.strip()
+                    or any(ord(char) < 32 or ord(char) == 127 for char in entry)):
+                raise ConfigError(
+                    "[service].sandbox_readonly_paths entries must be non-empty "
+                    "single-line strings"
+                )
+            candidate = Path(entry.strip())
+            if not candidate.is_absolute() or ".." in candidate.parts:
+                raise ConfigError(
+                    "[service].sandbox_readonly_paths entries must be absolute paths without .."
+                )
+            if len(candidate.parts) < 2:
+                raise ConfigError(
+                    "[service].sandbox_readonly_paths must not expose the host root directory"
+                )
+            if candidate == service_home or service_home.is_relative_to(candidate):
+                raise ConfigError(
+                    "[service].sandbox_readonly_paths must not expose the service user's home"
+                )
+            if candidate in collected:
+                raise ConfigError(
+                    f"[service].sandbox_readonly_paths contains a duplicate: {candidate}"
+                )
+            collected.append(candidate)
+        readonly_paths = tuple(collected)
 
     projects_raw = raw.get("projects")
     if not isinstance(projects_raw, dict) or not projects_raw:
@@ -253,6 +291,7 @@ def load_config(path: str | Path) -> AppConfig:
                 git_user_email=git_identity.get("git_user_email"),
                 ssh_agent_socket=ssh_paths.get("ssh_agent_socket"),
                 ssh_known_hosts=ssh_paths.get("ssh_known_hosts"),
+                readonly_paths=readonly_paths,
             )
         container_name = project_raw.get("container_name")
         container: ContainerConfig | None = None
@@ -338,5 +377,6 @@ def load_config(path: str | Path) -> AppConfig:
             sandbox_git_user_email=git_identity.get("git_user_email"),
             sandbox_ssh_agent_socket=ssh_paths.get("ssh_agent_socket"),
             sandbox_ssh_known_hosts=ssh_paths.get("ssh_known_hosts"),
+            sandbox_readonly_paths=readonly_paths,
         ),
     )

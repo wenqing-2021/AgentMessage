@@ -16,6 +16,7 @@ final_message_limit = 3500
 # Global dedicated SSH agent shared by every bubblewrap sandbox project; both absolute paths are required. No private keys are mounted.
 # sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh/agent.sock"
 # sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
+# sandbox_readonly_paths = ["/opt/quarto", "/etc/fonts"]
 
 [projects.agent_message]
 path = "/home/alice/workspace/agent_message"

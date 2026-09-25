@@ -65,6 +65,41 @@ class ConfigTests(unittest.TestCase):
                 with self.subTest(settings=settings), self.assertRaisesRegex(ConfigError, r"\[service\]"):
                     load_config(config.config_path)
 
+    def test_service_readonly_paths_are_validated_and_shared(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = make_config(
+                Path(temp), ("alpha", "beta", "plain"), sandbox_projects=("alpha", "beta")
+            )
+            original = config.config_path.read_text()
+            settings = 'sandbox_readonly_paths = ["/opt/quarto", "/etc/fonts"]'
+            config.config_path.write_text(
+                original.replace("[service]\n", "[service]\n" + settings + "\n")
+            )
+            loaded = load_config(config.config_path)
+            expected = (Path("/opt/quarto"), Path("/etc/fonts"))
+            self.assertEqual(loaded.service.sandbox_readonly_paths, expected)
+            for alias in ("alpha", "beta"):
+                sandbox = loaded.projects[alias].sandbox
+                assert sandbox is not None
+                self.assertEqual(sandbox.readonly_paths, expected)
+            self.assertIsNone(loaded.projects["plain"].sandbox)
+
+            for bad in (
+                'sandbox_readonly_paths = "/opt/quarto"',
+                "sandbox_readonly_paths = [42]",
+                'sandbox_readonly_paths = [""]',
+                'sandbox_readonly_paths = ["relative/path"]',
+                'sandbox_readonly_paths = ["/opt/../etc"]',
+                'sandbox_readonly_paths = ["/"]',
+                f'sandbox_readonly_paths = ["{Path.home().parent}"]',
+                'sandbox_readonly_paths = ["/opt/quarto", "/opt/quarto"]',
+            ):
+                config.config_path.write_text(
+                    original.replace("[service]\n", "[service]\n" + bad + "\n")
+                )
+                with self.subTest(settings=bad), self.assertRaisesRegex(ConfigError, r"\[service\]"):
+                    load_config(config.config_path)
+
     def test_project_git_settings_report_global_location(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = make_config(Path(temp))

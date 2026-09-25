@@ -33,6 +33,7 @@ sandbox_timeout_seconds = 86400
 - `sandbox_enabled` turns the sandbox on. Set `sandbox_gpu = true` only for CUDA/JAX work; that is when `/dev/dxg` and the WSL CUDA library path are added.
 - `sandbox_network` defaults to `true`; set it to `false` to isolate sandbox networking.
 - A project cannot enable both the Bubblewrap sandbox and the Docker container runner.
+- `[service].sandbox_readonly_paths` is a global allowlist that exposes host tools outside `/usr` read-only to every sandbox-enabled project, for example `sandbox_readonly_paths = ["/opt/quarto", "/etc/fonts"]`; entries must be absolute paths that exist on the host, otherwise every sandbox command in that project fails, and they must name the install root instead of a symlink such as `/usr/local/bin/quarto`.
 - The legacy keys `gpu_enabled`, `gpu_network`, `gpu_timeout_seconds`, and the `[projects.<alias>.gpu]` table are still read as `sandbox_enabled = true` plus `sandbox_gpu = true`. Do not mix them with the new keys.
 - Restart AgentMessage after changing the configuration.
 
@@ -155,7 +156,7 @@ Forwarding the socket lets the sandbox authenticate and sign with every key load
 
 ## Security Boundary
 
-- The sandbox mounts only the current project and the required system files; `/dev/dxg` is added only when `sandbox_gpu` is enabled.
+- The sandbox mounts only the current project and the required system files: all of `/usr` is visible read-only, host paths listed in `[service].sandbox_readonly_paths` are added read-only, and `/dev/dxg` is added only when `sandbox_gpu` is enabled.
 - The project and its internal `.git` are writable, and Git writes go through `sandbox_run`. External worktree Git metadata and private keys are not mounted; only an explicitly configured SSH agent socket and known-hosts file are exposed, and remote operations still require enabled networking.
 - The host HOME, Windows directories, other projects, Feishu credentials, and the AgentMessage database are not visible.
 - Bubblewrap uses `--clearenv`, so sandbox commands never inherit Feishu service environment variables.
