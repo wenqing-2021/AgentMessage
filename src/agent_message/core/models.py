@@ -9,7 +9,6 @@ from pathlib import Path
 
 class AgentKind(str, Enum):
     CODEX = "codex"
-    QODER = "qoder"
 
 
 class TaskStatus(str, Enum):

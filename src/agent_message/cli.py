@@ -13,7 +13,6 @@ from pathlib import Path
 from .agents.adapters import (
     AdapterError,
     CodexAdapter,
-    QoderAdapter,
     adapter_for,
 )
 from .core.config import AppConfig, ConfigError, ProjectConfig, load_config
@@ -67,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     _config_argument(authorize)
     authorize.add_argument("open_id")
     resume = subcommands.add_parser(
-        "resume", help="open a persisted Codex or Qoder task in the terminal"
+        "resume", help="open a persisted Codex task in the terminal"
     )
     _config_argument(resume)
     resume.add_argument("task_id")
@@ -147,23 +146,6 @@ def _ssh_agent_keys() -> str:
     if code == 1:
         return "未加载密钥（有口令的私钥需手动 ssh-add 解锁）"
     return "无法确认（SSH agent 未就绪）"
-
-
-def _qoder_login_status() -> bool | None:
-    try:
-        status, output = _command_output(
-            ["qodercli", "--setting-sources", "", "status", "-o", "json"]
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if status != 0:
-        return False
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
-        return None
-    logged_in = payload.get("logged_in") if isinstance(payload, dict) else None
-    return logged_in if isinstance(logged_in, bool) else None
 
 
 def _sandbox_doctor(config: AppConfig, project_alias: str) -> int:
@@ -418,51 +400,6 @@ def command_doctor(
         login_status, _ = _command_output(["codex", "login", "status"])
         print(f"  Codex JSON/恢复契约：{'通过' if contract_ok else '不兼容'}")
         print(f"  Codex 登录：{'已登录' if login_status == 0 else '未登录或无法确认'}")
-    print(f"Qoder：{_version('qodercli')}")
-    if QoderAdapter().available():
-        _, qoder_help = _command_output(["qodercli", "--help"])
-        _, qoder_mcp_help = _command_output(["qodercli", "mcp", "--help"])
-        required_flags = (
-            "--output-format",
-            "--resume",
-            "--permission-mode",
-            "--tools",
-            "--allowed-tools",
-            "--disallowed-tools",
-            "--mcp-config",
-            "--strict-mcp-config",
-            "--setting-sources",
-        )
-        _, format_probe = _command_output(
-            [
-                "qodercli",
-                "--tools",
-                "",
-                "--no-session-persistence",
-                "-p",
-                "probe",
-                "--output-format",
-                "__agent_message_probe__",
-            ]
-        )
-        contract_ok = (
-            all(flag in qoder_help for flag in required_flags)
-            and "stream-json" in format_probe
-            and "list" in qoder_mcp_help
-        )
-        login = _qoder_login_status()
-        print(f"  Qoder JSON/恢复契约：{'通过' if contract_ok else '不兼容'}")
-        print(
-            "  Qoder 登录："
-            + (
-                "已登录"
-                if login is True
-                else "未登录或当前环境无法连接"
-                if login is False
-                else "无法确认"
-            )
-        )
-        print("  Qoder Bash 网络：允许")
     print(
         "飞书凭证："
         + ("已设置" if config.app_id and config.app_secret else "缺失（仅 run 命令需要）")

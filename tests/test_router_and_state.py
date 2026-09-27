@@ -85,27 +85,6 @@ class RouterAndStateTests(unittest.TestCase):
         self.assertEqual(second.task_id, task.id)
         self.assertEqual(second.session_id, "default-thread")
 
-    def test_qoder_only_project_creates_and_selects_default_qoder_chat(self) -> None:
-        self.state.close()
-        self.config = make_config(
-            Path(self.temp.name),
-            qoder_only_projects=("alpha",),
-        )
-        self.state = StateStore(self.config)
-        self.state.authorize("ou-1")
-        self.router = MessageRouter(self.config, self.state)
-
-        reply = self.router.handle(inbound("hello qoder", "q1", "qm1"))
-        self.assertIn("默认 Qoder 对话", reply[0])
-        task = self.state.selected_task("chat-1", "ou-1")
-        assert task is not None
-        self.assertEqual(task.agent, AgentKind.QODER)
-        self.assertEqual(task.origin, TaskOrigin.CHAT)
-
-        self.router.handle(inbound("/new alpha separate", "q2", "qm2"))
-        reply = self.router.handle(inbound("/chat", "q3", "qm3"))
-        self.assertIn(task.id, reply[0])
-        self.assertIn("Qoder", reply[0])
 
     def test_chat_returns_to_default_chat_after_new_task(self) -> None:
         self.router.handle(inbound("start the long-lived chat", "e1", "m1"))
@@ -273,7 +252,7 @@ class CompactCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.config = make_config(
-            Path(self.temp.name), ("alpha", "beta"), qoder_only_projects=("beta",)
+            Path(self.temp.name), ("alpha", "beta")
         )
         self.state = StateStore(self.config)
         self.state.authorize("ou-1")
@@ -314,18 +293,6 @@ class CompactCommandTests(unittest.TestCase):
 
         self.assertIn("尚未创建 session", reply[0])
 
-    def test_compact_rejects_qoder_task(self) -> None:
-        task_id = self.start_session("beta")
-        task = self.state.get_task(task_id)
-        assert task is not None
-        self.assertEqual(task.agent, AgentKind.QODER)
-
-        reply = self.router.handle(inbound("/compact", "e2", "m2"))
-
-        self.assertIn("仅支持 Codex", reply[0])
-        self.assertIsNone(
-            self.state.queue_message(task_id, "ou-1", "/compact", operation="compact")
-        )
 
     def test_compact_queues_operation_for_selected_session(self) -> None:
         task_id = self.start_session()

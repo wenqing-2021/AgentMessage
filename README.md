@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/img/logo.png" width="100%" alt="AgentMessage connects a Feishu bot to Codex or Qoder in WSL, with optional Docker and Bubblewrap sandbox runtimes">
+  <img src="assets/img/logo-codex.png" width="100%" alt="AgentMessage connects a Feishu bot to Codex in WSL, with optional Docker and Bubblewrap sandbox runtimes">
 </p>
 
 <p align="center">
@@ -17,18 +17,18 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT License"></a>
 </p>
 
-AgentMessage uses a Feishu long connection to forward direct bot messages to Codex CLI or Qoder CLI on WSL/Linux, then sends task progress and results back to Feishu. It requires no public IP address, open port, or callback URL.
+AgentMessage uses a Feishu long connection to forward direct bot messages to Codex CLI on WSL/Linux, then sends task progress and results back to Feishu. It requires no public IP address, open port, or callback URL.
 
-## Features
+## 1. Features
 
 - **Feishu remote coding:** send tasks and receive progress and results without a public IP or open port.
-- **Codex and Qoder:** choose an agent per project and resume the same session from your terminal.
+- **Codex:** run tasks in configured projects and resume the same session from your terminal.
 - **Persistent conversations:** queue tasks, track status and logs, and stop work from Feishu; different projects can run concurrently.
 - **Model controls:** switch Codex models and reasoning effort, and compact context without starting a new session.
 - **Bubblewrap sandbox and Docker:** give any project a controlled sandbox with writable Git metadata, and enable GPU passthrough per project.
 - **Access control:** authorize users and restrict work to registered projects.
 
-## Configure Feishu
+## 2. Configure Feishu
 
 Open the [Feishu Developer Console](https://open.feishu.cn/app):
 
@@ -38,13 +38,12 @@ Open the [Feishu Developer Console](https://open.feishu.cn/app):
 4. Create and publish an app version, restricting the bot's availability to yourself.
 5. Keep the App ID and App Secret ready. The installer asks for them in the terminal and does not echo the Secret.
 
-## One-command Installation
+## 3. One-command Installation
 
-Use curl on Ubuntu/WSL or another common systemd Linux distribution, with at least one Codex CLI or Qoder CLI installed. Agent CLI authentication still uses its official command:
+Use curl on Ubuntu/WSL or another common systemd Linux distribution, with Codex CLI installed. Agent CLI authentication still uses its official command:
 
 ```bash
-codex login       # when using Codex
-qodercli login    # when using Qoder
+codex login
 ```
 
 Download the installer over HTTPS and run it:
@@ -65,7 +64,7 @@ bash /tmp/agent-message-install.sh --install-dir /absolute/path/AgentMessage
 
 If systemd is installed but inactive in WSL, the installer pauses with the required `/etc/wsl.conf` and `wsl --shutdown` instructions. Reopen WSL and run it again to resume.
 
-## Project Configuration
+## 4. Project Configuration
 
 The installer initially registers the AgentMessage repository itself as the default project. Add your own projects by editing:
 
@@ -84,19 +83,19 @@ codex_tool_network = false
 
 [projects.website]
 path = "/home/alice/workspace/website"
-default_agent = "qoder"
-allowed_agents = ["codex", "qoder"]
+default_agent = "codex"
+allowed_agents = ["codex"]
 ```
 
 - `path` must be an existing absolute local path; Feishu messages cannot submit arbitrary paths.
-- `default_agent` must be present in `allowed_agents`; Codex-only, Qoder-only, and mixed projects are supported.
-- Ordinary Codex tools can use the network only when `codex_tool_network = true`; ordinary Qoder Bash commands can use the network by default.
+- `default_agent` must be present in `allowed_agents`; only `codex` is supported.
+- Ordinary Codex tools can use the network only when `codex_tool_network = true`.
 - See [`config/projects.example.toml`](config/projects.example.toml) for all common fields.
 - See [Bubblewrap sandbox](assets/docs/sandbox-bubblewrap.en.md) for isolated execution, Git writes, optional GPU/CUDA/JAX access, and exposing host tools through `[service].sandbox_readonly_paths`.
 
 Use the restart commands at the end of this README after changing the configuration.
 
-## First Authorization
+## 5. First Authorization
 
 After installation, send `/help` to the bot in Feishu, then inspect and authorize your own `open_id`:
 
@@ -115,58 +114,35 @@ systemctl --user status agent-message --no-pager
 journalctl --user -u agent-message -f
 ```
 
-## Feishu Commands
+## 6. Feishu Commands
 
-Ordinary text continues the current task. When there is no current task, the default project's `default_agent` starts a long-lived conversation.
+Send text to continue the current task; if none is selected, a conversation starts in the default project. `<project>` is a configured alias, and `<id>` is the task ID shown by `/status`.
 
-```text
-/new website <task description>
-/new website --agent qoder <task description>
-/chat
-/model
-/model <model name>
-/model 1
-/model next
-/model prev
-/model 1 high
-/model effort high
-/model effort default
-/compact
-/use a1b2c3d4
-/status
-/status a1b2c3d4
-/logs a1b2c3d4 50
-/logs a1b2c3d4 50 sandbox
-/logs a1b2c3d4 50 container
-/stop a1b2c3d4
-/send reports/result.png
-/help
-```
+| Command | Function |
+| --- | --- |
+| `/new <project> <description>` | Create and select a new task. |
+| `/chat` | Return to the default project's ongoing conversation. |
+| `/use <id>` | Select a task for subsequent messages. |
+| `/status [id]` | Show the current or specified task's ID and status. |
+| `/list` | Show the current project's 5 newest unarchived Codex Chats titles. |
+| `/history <id>` | Show the last 20 messages from the task's latest sync. |
+| `/model` | List available Codex model numbers and reasoning levels. |
+| `/model 1` | Select a model by number or name. |
+| `/model next` | Select the next model; use `prev` for the previous one. |
+| `/model 1 high` | Set both the model and reasoning effort. |
+| `/model effort high` | Set reasoning effort only; use `default` to reset it. |
+| `/compact` | Compact the current Codex context, retaining the session; queue if busy. |
+| `/logs <id> 20` | Show the last 20 lines of Agent logs. |
+| `/logs <id> 20 sandbox` | Show sandbox logs; use `container` for container logs. |
+| `/stop <id>` | Stop the specified task. |
+| `/send <relative-path>` | Send an image or file from the current project to Feishu. |
+| `/help` | Show command help. |
 
-`/send` uploads a file from the current task's project to the chat: images (png/jpg/jpeg/gif/webp/bmp) arrive as Feishu image messages, everything else as file messages. Paths must stay inside the project; images are limited to 10MB and other files to 30MB.
+Model settings apply from the next turn and persist across restarts. Send images or files directly to the Agent, or ask it to send project files back; limits are 10MB for images and 30MB for other files.
 
-You can also send image or file messages directly to the bot. They are downloaded into the project at `.agent-message/inbox/` and handed to the agent with their path, so the host, Bubblewrap sandboxes, and bind-mounted containers can all read them. The same size limits apply, and the directory is not cleaned automatically; consider adding `.agent-message/` to the project's `.gitignore`.
+Continue the same session in a terminal: `uv run agent-message resume <id>`.
 
-Agents send project files with the script the bridge keeps installed in the project:
-
-```bash
-sh .agent-message/bin/send-to-feishu reports/result.png
-```
-
-The script queues the file in `.agent-message/outbox/` and waits for the bridge, which does the upload with its own credentials, so nothing is exposed to the agent or its shell. It prints `已发送` and exits 0 when the file reached Feishu, and exits non-zero with the reason otherwise. The same limits apply: project files only, 10MB for images, 30MB for everything else. Add the call to the project's `AGENTS.md` if you want agents to reach for it without being asked. Unlike `/send`, this path is not queued in the durable outbox: it is a direct transfer whose result the agent reports in its own reply.
-
-`/model` lists available models and reasoning levels. Select by name or number, cycle with `next` / `prev`, or set effort with `/model 1 high` and `/model effort high`. Use `/model effort default` to reset effort. These global Codex settings persist across restarts and take effect on the next turn.
-
-`/compact` compresses the current Codex conversation while preserving its session. If a turn is running, compaction waits until it finishes.
-
-Resume the same Codex/Qoder session from a terminal:
-
-```bash
-cd ~/workspace/AgentMessage
-uv run agent-message resume a1b2c3d4
-```
-
-## Sandbox Git Setup
+## 7. Sandbox Git Setup
 
 Configure the Git author identity and SSH authentication shared by all Bubblewrap sandbox projects:
 
@@ -179,15 +155,15 @@ For automatic SSH-agent startup on WSL boot, follow the [systemd setup](assets/d
 
 Prepare a dedicated SSH agent and verified `known_hosts` file for SSH push/pull, then restart AgentMessage after saving. See the [sandbox guide](assets/docs/sandbox-bubblewrap.en.md) for setup and troubleshooting. Container Git authentication is configured separately inside the container.
 
-## Docker Projects
+## 8. Docker Projects
 
 Run project commands in an existing Docker container. Bind-mount the host project directory read-write at `container_path`:
 
 ```toml
 [projects.container_project]
 path = "/home/alice/workspace/container_project"
-default_agent = "qoder"
-allowed_agents = ["codex", "qoder"]
+default_agent = "codex"
+allowed_agents = ["codex"]
 container_name = "container_project_dev"
 container_path = "/workspace/container_project"
 container_auto_start = true
@@ -199,9 +175,9 @@ cd ~/workspace/AgentMessage
 uv run agent-message doctor --container container_project
 ```
 
-A container project cannot also enable the Bubblewrap sandbox. Qoder receives no host Bash tool and can use only the controlled `container_run`. Expose the Docker socket only to the trusted AgentMessage service user.
+A container project cannot also enable the Bubblewrap sandbox. Project commands run through the controlled `container_run` tool. Expose the Docker socket only to the trusted AgentMessage service user.
 
-## Uninstall
+## 9. Uninstall
 
 Run the uninstaller from outside the repository:
 
@@ -212,9 +188,9 @@ bash ~/workspace/AgentMessage/uninstall.sh
 
 Removes AgentMessage and its service, with an optional backup of configuration, history, logs, and credentials. At the backup prompt, Enter defaults to no backup.
 
-## Security and Development
+## 10. Security and Development
 
-- Feishu credentials remain outside the repository and are removed from Codex/Qoder child-process environments.
+- Feishu credentials remain outside the repository and are removed from Codex child-process environments.
 - Register only projects the Agent may modify. Full JSONL and command logs remain local under `var/logs/`.
 - See [`AGENTS.md`](AGENTS.md) for architecture boundaries, extension recipes, and test requirements.
 
@@ -224,7 +200,7 @@ uv run agent-message doctor
 uv run agent-message tasks
 ```
 
-## Update and Restart
+## 11. Update and Restart
 
 ```bash
 cd ~/workspace/AgentMessage
@@ -242,7 +218,7 @@ systemctl --user restart agent-message
 uv run agent-message doctor
 ```
 
-### Synchronize Feishu and Codex Chats sessions
+## 12. Synchronize Feishu and Codex Chats sessions
 
 Run these two commands from the repository directory. No Codex UUID lookup is needed:
 
@@ -252,3 +228,9 @@ uv run sync-codex-to-feishu "Title shown in Chats"
 ```
 
 Feishu `/list` shows the current project’s 5 newest unarchived Codex Chats titles.
+
+## 13. Planned Features
+
+- [ ] Automatically upload files to Feishu.
+- [ ] Monitor: track task progress.
+- [ ] Usage: query usage quotas.

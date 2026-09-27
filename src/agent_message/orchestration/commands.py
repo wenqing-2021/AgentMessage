@@ -36,19 +36,17 @@ ParsedCommand = NewTaskCommand | SimpleCommand | None
 
 HELP_TEXT = """先认识 4 个概念：
 项目别名：配置中项目路径的短名称，例如 website；不能填写任意目录路径。
-任务：一次独立的 Codex/Qoder 工作会话，例如“修复首页按钮样式”。
+任务：一次独立的 Codex 工作会话，例如“修复首页按钮样式”。
 任务 ID：创建任务后返回的编号，例如 a1b2c3d4；用于切换、查看、停止任务。
 当前任务：你接下来直接发送的普通文本会继续发送到的任务。
 
 直接与默认 Agent 聊天：首次直接发送普通文本，会按默认项目的 default_agent 创建长期对话；以后普通文本会续写它。/chat 可回到该对话。
-沙箱：项目设置 sandbox_enabled = true 后，Codex 或 Qoder 的项目命令一律在 bubblewrap 沙箱内执行；需要 GPU 的项目再加 sandbox_gpu = true。
-容器：项目设置 container_name 后，Codex 或 Qoder 会在宿主编辑挂载源码，并在已有容器中执行命令。
+沙箱：项目设置 sandbox_enabled = true 后，Codex 的项目命令一律在 bubblewrap 沙箱内执行；需要 GPU 的项目再加 sandbox_gpu = true。
+容器：项目设置 container_name 后，Codex 会在宿主编辑挂载源码，并在已有容器中执行命令。
 
 例子：
 /new website 修复首页登录按钮在手机端溢出的问题
 → 创建并选中一个任务；之后直接发送“先检查 CSS，不要修改文件”会继续该任务。
-/new website --agent qoder 检查测试失败原因
-→ 创建并选中 Qoder 任务。
 /use a1b2c3d4
 → 切换当前任务；之后普通文本会继续 a1b2c3d4。
 /chat
@@ -119,7 +117,7 @@ def parse_command(text: str) -> ParsedCommand:
         )
     if command == "/new":
         if len(parts) < 3:
-            raise CommandError("用法：/new <项目别名> [--agent codex|qoder] <任务>")
+            raise CommandError("用法：/new <项目别名> [--agent codex] <任务>")
         alias = parts[1]
         agent: AgentKind | None = None
         prompt_start = 2
@@ -127,7 +125,7 @@ def parse_command(text: str) -> ParsedCommand:
             try:
                 agent = AgentKind(parts[3])
             except ValueError as exc:
-                raise CommandError("--agent 只能是 codex 或 qoder。") from exc
+                raise CommandError("--agent 仅支持 codex。") from exc
             prompt_start = 4
         if len(parts) <= prompt_start:
             raise CommandError("/new 需要任务描述。")

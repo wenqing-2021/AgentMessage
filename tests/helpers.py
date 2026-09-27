@@ -12,7 +12,6 @@ def make_config(
     sandbox_projects: tuple[str, ...] = (),
     sandbox_gpu_projects: tuple[str, ...] = (),
     container_projects: tuple[str, ...] = (),
-    qoder_only_projects: tuple[str, ...] = (),
 ) -> AppConfig:
     entries: list[str] = [
         "[service]",
@@ -31,18 +30,8 @@ def make_config(
             [
                 f"[projects.{name}]",
                 f'path = "{project_path}"',
-                (
-                    'default_agent = "qoder"'
-                    if name in qoder_only_projects
-                    else 'default_agent = "codex"'
-                ),
-                (
-                    'allowed_agents = ["qoder"]'
-                    if name in qoder_only_projects
-                    else 'allowed_agents = ["codex"]'
-                    if name in container_projects
-                    else 'allowed_agents = ["codex", "qoder"]'
-                ),
+                'default_agent = "codex"',
+                'allowed_agents = ["codex"]',
                 "",
             ]
         )

@@ -143,32 +143,6 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "unknown"):
                 load_config(path)
 
-    def test_default_chat_project_can_be_qoder_only(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            project = root / "project"
-            project.mkdir()
-            path = root / "projects.toml"
-            path.write_text(
-                "\n".join(
-                    [
-                        "[service]",
-                        'default_chat_project = "alpha"',
-                        "",
-                        "[projects.alpha]",
-                        f'path = "{project}"',
-                        'default_agent = "qoder"',
-                        'allowed_agents = ["qoder"]',
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            config = load_config(path)
-            self.assertEqual(config.projects["alpha"].default_agent.value, "qoder")
-            self.assertEqual(
-                {agent.value for agent in config.projects["alpha"].allowed_agents},
-                {"qoder"},
-            )
 
     def test_rejects_non_boolean_codex_tool_network(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -236,17 +210,6 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(sandbox.gpu)
             self.assertTrue(sandbox.network)
 
-    def test_qoder_only_gpu_project_is_valid(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            config = make_config(
-                Path(temp),
-                sandbox_gpu_projects=("alpha",),
-                qoder_only_projects=("alpha",),
-            )
-            project = config.projects["alpha"]
-            self.assertEqual(project.default_agent.value, "qoder")
-            self.assertEqual({agent.value for agent in project.allowed_agents}, {"qoder"})
-            self.assertTrue(project.sandbox and project.sandbox.enabled)
 
     def test_rejects_invalid_gpu_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -407,7 +370,7 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(ConfigError, "container_path"):
                         load_config(invalid)
 
-    def test_container_project_accepts_qoder_but_rejects_gpu_and_bad_timeout(self) -> None:
+    def test_container_project_rejects_gpu_and_bad_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             project = root / "project"
@@ -420,19 +383,6 @@ class ConfigTests(unittest.TestCase):
                 f'path = "{project}"',
                 'container_name = "alpha-dev"',
             ]
-            qoder_path = root / "projects-qoder.toml"
-            qoder_path.write_text(
-                "\n".join(
-                    [
-                        *base,
-                        'default_agent = "qoder"',
-                        'allowed_agents = ["qoder"]',
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            self.assertIsNotNone(load_config(qoder_path).projects["alpha"].container)
-
             cases = (
                 (
                     ['allowed_agents = ["codex"]', "gpu_enabled = true"],

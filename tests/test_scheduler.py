@@ -39,20 +39,6 @@ class ProgressAdapter(FinishedAdapter):
         return result
 
 
-class QoderFinishedAdapter(FinishedAdapter):
-    kind = AgentKind.QODER
-
-    async def execute(self, run: ClaimedRun, on_pid, on_session=None, on_progress=None):  # type: ignore[no-untyped-def]
-        callback = on_pid(23456)
-        if asyncio.iscoroutine(callback):
-            await callback
-        if on_session:
-            session_callback = on_session("qoder-thread")
-            if asyncio.iscoroutine(session_callback):
-                await session_callback
-        return AgentResult(0, "qoder-thread", "qoder done")
-
-
 class SchedulerTests(unittest.TestCase):
     def test_idle_timeout_is_normal_in_python_310(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -106,34 +92,6 @@ class SchedulerTests(unittest.TestCase):
             finally:
                 state.close()
 
-    def test_qoder_run_persists_session_and_finishes_normally(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            config = make_config(Path(temp), qoder_only_projects=("alpha",))
-            state = StateStore(config)
-            try:
-                task = state.create_task(
-                    project_alias="alpha",
-                    agent=AgentKind.QODER,
-                    chat_id="chat-1",
-                    owner_open_id="ou-1",
-                    prompt="work",
-                )
-                claimed = state.claimed_run()
-                assert claimed is not None
-                replies: list[str] = []
-                scheduler = Scheduler(config, state, lambda _chat, text: replies.append(text))
-                with patch(
-                    "agent_message.orchestration.scheduler.adapter_for",
-                    return_value=QoderFinishedAdapter(),
-                ):
-                    asyncio.run(scheduler._run_claim(claimed))
-                completed = state.get_task(task.id)
-                assert completed is not None
-                self.assertEqual(completed.status, TaskStatus.SUCCEEDED)
-                self.assertEqual(completed.session_id, "qoder-thread")
-                self.assertTrue(any("qoder" in text for text in replies))
-            finally:
-                state.close()
 
     def test_run_installs_transfer_script_before_starting_the_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

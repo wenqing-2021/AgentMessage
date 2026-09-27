@@ -21,9 +21,7 @@ final_message_limit = 3500
 [projects.agent_message]
 path = "/home/alice/workspace/agent_message"
 default_agent = "codex"
-allowed_agents = ["codex", "qoder"]
-# Set default_agent = "qoder" for a long-lived default Qoder chat. A project may
-# also use allowed_agents = ["qoder"] when Codex is not installed.
+allowed_agents = ["codex"]
 # Optional bubblewrap sandbox through AgentMessage's sandbox MCP. Project commands,
 # including Git writes, run through sandbox_run; add sandbox_gpu for CUDA/JAX work:
 # sandbox_enabled = true
@@ -36,7 +34,7 @@ allowed_agents = ["codex", "qoder"]
 [projects.container_project]
 path = "/home/alice/workspace/container_project"
 default_agent = "codex"
-allowed_agents = ["codex", "qoder"]
+allowed_agents = ["codex"]
 container_name = "container_project_dev"
 container_path = "/workspace/container_project"
 container_auto_start = true

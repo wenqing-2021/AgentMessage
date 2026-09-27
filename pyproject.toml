@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-message"
 version = "0.1.0"
-description = "A secure Feishu bridge for headless Codex and Qoder CLI tasks."
+description = "A secure Feishu bridge for headless Codex CLI tasks."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

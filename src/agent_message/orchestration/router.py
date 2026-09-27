@@ -29,7 +29,7 @@ Downloader = Callable[[str, str, str, Path, int], None]
 
 def _agent_label(agent: AgentKind) -> str:
     value = getattr(agent, "value", str(agent))
-    return "Codex" if value == "codex" else "Qoder" if value == "qoder" else str(value)
+    return "Codex" if value == "codex" else str(value)
 
 
 def _valid_model_name(name: str) -> bool:
@@ -197,8 +197,6 @@ class MessageRouter:
             task = self.state.selected_task(message.chat_id, message.sender_open_id)
             if task is None:
                 return ["没有当前任务，请先发送消息创建会话，或用 /use 选择任务。"]
-            if task.agent != AgentKind.CODEX:
-                return ["/compact 目前仅支持 Codex，暂不支持 Qoder。"]
             if not task.session_id:
                 return ["当前任务尚未创建 session，请等待首轮执行后再发送 /compact。"]
             updated = self.state.queue_message(

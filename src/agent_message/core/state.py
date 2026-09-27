@@ -71,6 +71,8 @@ class StateStore:
                     updated_at TEXT NOT NULL,
                     last_summary TEXT
                 );
+                CREATE VIEW IF NOT EXISTS codex_tasks AS
+                    SELECT * FROM tasks WHERE agent = 'codex';
                 CREATE INDEX IF NOT EXISTS idx_tasks_project_status
                     ON tasks(project_alias, status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_chat
@@ -205,6 +207,29 @@ class StateStore:
             self._add_column_if_missing("outbox", "kind", "TEXT NOT NULL DEFAULT 'text'")
             self._add_column_if_missing("outbox", "file_path", "TEXT")
             self._migrate_legacy_sandbox_jobs()
+            self._retire_unsupported_agents()
+
+    def _retire_unsupported_agents(self) -> None:
+        """Keep historical data, but never resume it with a different agent."""
+        timestamp = _now()
+        self._connection.execute(
+            "UPDATE task_messages SET status='cancelled', finished_at=? "
+            "WHERE task_id IN (SELECT id FROM tasks WHERE agent != 'codex') "
+            "AND status IN ('queued', 'running')", (timestamp,)
+        )
+        self._connection.execute(
+            "UPDATE runs SET status='interrupted', finished_at=?, error=COALESCE(error, 'agent no longer supported') "
+            "WHERE task_id IN (SELECT id FROM tasks WHERE agent != 'codex') AND status='running'", (timestamp,)
+        )
+        self._connection.execute(
+            "UPDATE tasks SET status='stopped', updated_at=? "
+            "WHERE agent != 'codex' AND status IN ('queued', 'running')", (timestamp,)
+        )
+        for column in ('selected_task_id', 'default_chat_task_id'):
+            self._connection.execute(
+                f"UPDATE chat_context SET {column}=NULL WHERE {column} IN "
+                "(SELECT id FROM tasks WHERE agent != 'codex')"
+            )
 
     def _migrate_legacy_sandbox_jobs(self) -> None:
         """Move jobs recorded before the GPU runtime became the sandbox runtime.
@@ -319,6 +344,8 @@ class StateStore:
         prompt: str,
         origin: TaskOrigin = TaskOrigin.TASK,
     ) -> Task:
+        if agent != AgentKind.CODEX:
+            raise ValueError("Only codex is supported")
         task_id = _task_id()
         timestamp = _now()
         with self._lock, self._connection:
@@ -347,7 +374,7 @@ class StateStore:
             self._set_selected_locked(chat_id, task_id)
             if origin == TaskOrigin.CHAT:
                 self._set_default_chat_locked(chat_id, task_id)
-            row = self._connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            row = self._connection.execute("SELECT * FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
         return self._row_to_task(row)
 
     def _set_selected_locked(self, chat_id: str, task_id: str | None) -> None:
@@ -385,7 +412,7 @@ class StateStore:
             row = self._connection.execute(
                 """
                 SELECT t.* FROM chat_context c
-                JOIN tasks t ON t.id = c.default_chat_task_id
+                JOIN codex_tasks t ON t.id = c.default_chat_task_id
                 WHERE c.chat_id = ? AND t.owner_open_id = ? AND t.project_alias = ?
                   AND t.agent = ? AND t.origin = ?
                 """,
@@ -405,7 +432,7 @@ class StateStore:
     def select_task(self, chat_id: str, task_id: str, owner_open_id: str) -> Task | None:
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT * FROM tasks WHERE id = ? AND chat_id = ? AND owner_open_id = ?",
+                "SELECT * FROM codex_tasks WHERE id = ? AND chat_id = ? AND owner_open_id = ?",
                 (task_id, chat_id, owner_open_id),
             ).fetchone()
             if row is None:
@@ -418,7 +445,7 @@ class StateStore:
             row = self._connection.execute(
                 """
                 SELECT t.* FROM chat_context c
-                JOIN tasks t ON t.id = c.selected_task_id
+                JOIN codex_tasks t ON t.id = c.selected_task_id
                 WHERE c.chat_id = ? AND t.owner_open_id = ?
                 """,
                 (chat_id, owner_open_id),
@@ -433,7 +460,7 @@ class StateStore:
         timestamp = _now()
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT * FROM tasks WHERE id = ? AND owner_open_id = ?", (task_id, owner_open_id)
+                "SELECT * FROM codex_tasks WHERE id = ? AND owner_open_id = ?", (task_id, owner_open_id)
             ).fetchone()
             if row is None:
                 return None
@@ -456,12 +483,12 @@ class StateStore:
                 (next_status, timestamp, task_id),
             )
             return self._row_to_task(
-                self._connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                self._connection.execute("SELECT * FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
             )
 
     def get_task(self, task_id: str, chat_id: str | None = None) -> Task | None:
         with self._lock:
-            sql = "SELECT * FROM tasks WHERE id = ?"
+            sql = "SELECT * FROM codex_tasks WHERE id = ?"
             params: tuple[str, ...] = (task_id,)
             if chat_id is not None:
                 sql += " AND chat_id = ?"
@@ -473,10 +500,10 @@ class StateStore:
         with self._lock:
             if chat_id:
                 rows = self._connection.execute(
-                    "SELECT * FROM tasks WHERE chat_id = ? ORDER BY created_at DESC", (chat_id,)
+                    "SELECT * FROM codex_tasks WHERE chat_id = ? ORDER BY created_at DESC", (chat_id,)
                 ).fetchall()
             else:
-                rows = self._connection.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
+                rows = self._connection.execute("SELECT * FROM codex_tasks ORDER BY created_at DESC").fetchall()
             return [self._row_to_task(row) for row in rows]
 
     def import_codex_session(
@@ -497,7 +524,7 @@ class StateStore:
             if project is None or AgentKind.CODEX not in project.allowed_agents:
                 raise ValueError('目标项目不允许 Codex。')
             rows = self._connection.execute(
-                "SELECT * FROM tasks WHERE session_id=? AND agent='codex'", (session_id,)
+                "SELECT * FROM codex_tasks WHERE session_id=? AND agent='codex'", (session_id,)
             ).fetchall()
             if len(rows) > 1:
                 raise ValueError('此 session 已关联多个任务，请先处理重复关联。')
@@ -525,7 +552,7 @@ class StateStore:
                 'INSERT INTO session_transcripts(task_id, position, role, content) VALUES (?, ?, ?, ?)',
                 [(task_id, index, role, content) for index, (role, content) in enumerate(transcript)],
             )
-            row = self._connection.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+            row = self._connection.execute('SELECT * FROM codex_tasks WHERE id=?', (task_id,)).fetchone()
             return self._row_to_task(row)
 
     @contextmanager
@@ -559,7 +586,7 @@ class StateStore:
         with self._lock:
             row = self._connection.execute(
                 "SELECT s.token, t.* FROM agent_sync_contexts s JOIN runs r ON r.id=s.run_id "
-                "JOIN tasks t ON t.id=r.task_id WHERE s.run_id=?", (run_id,)
+                "JOIN codex_tasks t ON t.id=r.task_id WHERE s.run_id=?", (run_id,)
             ).fetchone()
             return (row['token'], self._row_to_task(row)) if row else None
 
@@ -580,7 +607,7 @@ class StateStore:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT s.key, s.payload, t.* FROM agent_sync_requests s "
-                "JOIN runs r ON r.id=s.run_id JOIN tasks t ON t.id=r.task_id "
+                "JOIN runs r ON r.id=s.run_id JOIN codex_tasks t ON t.id=r.task_id "
                 "WHERE s.result IS NULL AND r.status != 'running' AND t.status NOT IN ('running', 'queued')"
             ).fetchall()
             return [(row['key'], row['payload'], self._row_to_task(row)) for row in rows]
@@ -600,7 +627,7 @@ class StateStore:
     def stop_task(self, task_id: str, owner_open_id: str) -> Task | None:
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT * FROM tasks WHERE id = ? AND owner_open_id = ?", (task_id, owner_open_id)
+                "SELECT * FROM codex_tasks WHERE id = ? AND owner_open_id = ?", (task_id, owner_open_id)
             ).fetchone()
             if row is None:
                 return None
@@ -614,7 +641,7 @@ class StateStore:
                 (MessageStatus.CANCELLED.value, timestamp, task_id, MessageStatus.QUEUED.value),
             )
             return self._row_to_task(
-                self._connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                self._connection.execute("SELECT * FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
             )
 
     def claimed_run(self) -> ClaimedRun | None:
@@ -625,11 +652,11 @@ class StateStore:
                 SELECT m.id AS message_id, m.task_id, m.content, m.operation, t.project_alias, t.agent,
                        t.session_id, t.chat_id
                 FROM task_messages m
-                JOIN tasks t ON t.id = m.task_id
+                JOIN codex_tasks t ON t.id = m.task_id
                 WHERE m.status = ?
                   AND t.status != ?
                   AND NOT EXISTS (
-                    SELECT 1 FROM tasks active
+                    SELECT 1 FROM codex_tasks active
                     WHERE active.project_alias = t.project_alias AND active.status = ?
                   )
                 ORDER BY m.created_at, m.id
@@ -700,7 +727,7 @@ class StateStore:
                 """
                 SELECT t.chat_id AS chat_id, t.id AS task_id
                 FROM runs r
-                JOIN tasks t ON t.id = r.task_id
+                JOIN codex_tasks t ON t.id = r.task_id
                 WHERE t.project_alias = ?
                 ORDER BY r.id DESC
                 LIMIT 1
@@ -754,7 +781,7 @@ class StateStore:
         summary = shlex.join(argv)[:1000]
         with self._lock, self._connection:
             task = self._connection.execute(
-                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+                "SELECT 1 FROM codex_tasks WHERE id = ?", (task_id,)
             ).fetchone()
             if task is None:
                 raise ValueError(f"unknown task: {task_id}")
@@ -890,7 +917,7 @@ class StateStore:
         argv_json = "[]"
         with self._lock, self._connection:
             task = self._connection.execute(
-                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
+                "SELECT 1 FROM codex_tasks WHERE id = ?", (task_id,)
             ).fetchone()
             if task is None:
                 raise ValueError(f"unknown task: {task_id}")
@@ -997,7 +1024,7 @@ class StateStore:
         timestamp = _now()
         task_status = TaskStatus.SUCCEEDED if exit_code == 0 and not error else TaskStatus.FAILED
         with self._lock, self._connection:
-            previous = self._connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            previous = self._connection.execute("SELECT status FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
             self._connection.execute(
                 """
                 UPDATE runs SET status = ?, finished_at = ?, exit_code = ?, final_message = ?, error = ?
@@ -1024,7 +1051,7 @@ class StateStore:
                 """,
                 (next_status.value, session_id, final_message, timestamp, task_id),
             )
-            row = self._connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            row = self._connection.execute("SELECT * FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
             return self._row_to_task(row)
 
     def recover_interrupted(self) -> list[Task]:
@@ -1047,7 +1074,7 @@ class StateStore:
                 (timestamp,),
             )
             rows = self._connection.execute(
-                "SELECT * FROM tasks WHERE status = ?", (TaskStatus.RUNNING.value,)
+                "SELECT * FROM codex_tasks WHERE status = ?", (TaskStatus.RUNNING.value,)
             ).fetchall()
             task_ids = [row["id"] for row in rows]
             if not task_ids:
@@ -1173,7 +1200,7 @@ class StateStore:
     def task_count_by_status(self) -> Iterable[tuple[str, int]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT status, COUNT(*) AS count FROM tasks GROUP BY status ORDER BY status"
+                "SELECT status, COUNT(*) AS count FROM codex_tasks GROUP BY status ORDER BY status"
             ).fetchall()
             return [(str(row["status"]), int(row["count"])) for row in rows]
 

@@ -1,6 +1,6 @@
 # Bubblewrap 沙箱
 
-AgentMessage 可让 Codex 或 Qoder 通过受控的 `sandbox_run` MCP 工具执行项目命令：依赖安装、构建、测试、训练和 Git 写操作都在同一个项目级 Bubblewrap 沙箱内完成。Codex 自己的 `workspace-write` 沙箱会把项目内 `.git` 设为只读，所以需要提交或推送的项目应启用这个沙箱。
+AgentMessage 可让 Codex 通过受控的 `sandbox_run` MCP 工具执行项目命令：依赖安装、构建、测试、训练和 Git 写操作都在同一个项目级 Bubblewrap 沙箱内完成。Codex 自己的 `workspace-write` 沙箱会把项目内 `.git` 设为只读，所以需要提交或推送的项目应启用这个沙箱。
 
 ## 前置条件
 
@@ -22,8 +22,8 @@ ls -l /dev/dxg
 ```toml
 [projects.your_proj_name]
 path = "/home/alice/workspace/your_proj_name"
-default_agent = "qoder"
-allowed_agents = ["codex", "qoder"]
+default_agent = "codex"
+allowed_agents = ["codex"]
 sandbox_enabled = true
 sandbox_gpu = false
 sandbox_network = true

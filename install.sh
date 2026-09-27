@@ -134,20 +134,10 @@ create_project_config() {
     [[ -f $PROJECT_CONFIG ]] && return 0
 
     local default_agent allowed_agents escaped_path temporary
-    if command -v codex >/dev/null 2>&1; then
-        default_agent=codex
-    elif command -v qodercli >/dev/null 2>&1; then
-        default_agent=qoder
-    else
-        default_agent=codex
-        warn "Neither codex nor qodercli is installed; install and log in to one before sending tasks."
-    fi
-    if command -v codex >/dev/null 2>&1 && command -v qodercli >/dev/null 2>&1; then
-        allowed_agents='["codex", "qoder"]'
-    elif [[ $default_agent == qoder ]]; then
-        allowed_agents='["qoder"]'
-    else
-        allowed_agents='["codex"]'
+    default_agent=codex
+    allowed_agents='["codex"]'
+    if ! command -v codex >/dev/null 2>&1; then
+        warn "Codex is not installed; install it and run codex login before sending tasks."
     fi
 
     escaped_path=$(toml_escape "$INSTALL_DIR")
@@ -295,7 +285,7 @@ systemd_path_value() {
 service_path() {
     local value="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     local executable directory
-    for executable in codex qodercli uv; do
+    for executable in codex uv; do
         if command -v "$executable" >/dev/null 2>&1; then
             directory=$(dirname "$(command -v "$executable")")
             if [[ :$value: != *":$directory:"* ]]; then
@@ -408,7 +398,7 @@ AgentMessage installation is complete.
   SSH agent:   $SSH_AGENT_UNIT_FILE
 
 Next:
-  1. Log in to Codex with "codex login" or Qoder with "qodercli login".
+  1. Log in to Codex with "codex login".
   2. Edit the project allowlist: vim "$PROJECT_CONFIG"
   3. Send /help to the Feishu bot, then authorize yourself with:
        cd "$INSTALL_DIR" && uv run agent-message pending-senders

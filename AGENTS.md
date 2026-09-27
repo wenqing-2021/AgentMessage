@@ -4,14 +4,14 @@
 
 ## 项目目标
 
-AgentMessage 通过飞书长连接接收单聊文本，将任务持久化后交给本机的 Codex CLI 或 Qoder CLI，并把进度与最终结果可靠地发回飞书。可选运行时允许二者在受控的 Bubblewrap 沙箱（GPU 透传按项目配置）或已有 Docker 容器内执行项目命令。
+AgentMessage 通过飞书长连接接收单聊文本，将任务持久化后交给本机的 Codex CLI，并把进度与最终结果可靠地发回飞书。可选运行时允许 Codex在受控的 Bubblewrap 沙箱（GPU 透传按项目配置）或已有 Docker 容器内执行项目命令。
 
 设计目标按优先级排列：
 
 1. 不把凭证、高权限接口或任意宿主路径暴露给远程消息。
 2. 消息、任务、会话和发送结果可恢复、可去重、可审计。
 3. 同一项目串行执行，不同项目可以并行。
-4. Codex/Qoder、消息通道和执行运行时可以独立扩展。
+4. Codex、消息通道和执行运行时可以独立扩展。
 
 ## 技术栈与开发命令
 
@@ -48,7 +48,7 @@ UV_CACHE_DIR=/tmp/agent-message-uv-cache uv build --out-dir /tmp/agent-message-d
 src/agent_message/
 ├── core/                    # 配置、领域模型、SQLite 持久化
 ├── channels/                # 飞书等外部消息通道
-├── agents/                  # Codex/Qoder CLI 适配器
+├── agents/                  # Codex CLI 适配器
 ├── orchestration/           # 命令、路由、调度和服务生命周期
 ├── runtimes/
 │   ├── sandbox/             # Bubblewrap policy / runner / MCP（GPU 透传可选）
@@ -91,7 +91,7 @@ BridgeService.receive
     └── durable outbox
              ▲
              │
-Scheduler ──> AgentAdapter ──> Codex/Qoder process
+Scheduler ──> AgentAdapter ──> Codex process
     │                              │
     ├── Sandbox/Container monitor  └── JSONL progress/session/final text
     └── finish_run ──> outbox ──> FeishuGateway.send_text
@@ -116,7 +116,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 
 - 项目只能来自 `config/projects.toml` 的绝对路径白名单；飞书消息不能提交路径。
 - App ID、App Secret 和初始 open_id 白名单只从环境变量读取。
-- Agent 子进程环境必须移除 `AGENT_MESSAGE_FEISHU_*` 和 `AGENT_MESSAGE_ALLOWED_OPEN_IDS`，不得让 Codex/Qoder 或其普通 Bash 继承飞书凭证。
+- Agent 子进程环境必须移除 `AGENT_MESSAGE_FEISHU_*` 和 `AGENT_MESSAGE_ALLOWED_OPEN_IDS`，不得让 Codex 或其普通 Bash 继承飞书凭证。
 - 专用 SSH agent 由 `deploy/agent-message-ssh-agent.service` 与 `deploy/agent-message-ssh-agent.conf` 定义，`install.sh` 默认安装启用，`uninstall.sh` 仅按 `# Managed by AgentMessage:` 标记清理；`scripts/load_ssh_keys.py` 只对当前用户所有、无 group/other 权限且无口令的私钥执行 `ssh-add`，不得提示口令、复制私钥进仓库或关闭主机指纹校验。
 - `install.sh` 的凭证输入必须通过 `/dev/tty`，App Secret 不回显；断点文件、环境文件、项目配置和生成的 unit 保持 `0600`。
 - `uninstall.sh` 必须先校验精确安装路径、停止服务并完成可选备份，再删除仓库和凭证目录；不得删除 systemd、uv、Agent CLI、Docker 或 Bubblewrap。
@@ -130,8 +130,6 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - Codex 默认使用 `workspace-write`，且 `sandbox_workspace_write.network_access=false`。
 - Codex resume 必须保留 session ID、项目上下文和当前轮次的 runtime policy 前缀。
 - `/compact` 通过 Codex app-server 的 `thread/compact/start` 执行原生压缩，不经过 `exec` 提示词；压缩请求作为 `task_messages.operation=compact` 持久化排队，并保留原 session ID。
-- Qoder 使用 `auto` 权限、空 `setting-sources`、显式工具列表和严格 MCP 配置；普通 Bash 允许联网，但继续限制 `sudo`、破坏性 Git 操作和发布命令。
-- Qoder 的 `result` 事件是唯一成败依据；不得把 assistant text、thinking、hook 输出或工具参数作为最终结果转发。
 - 不要以普通 Codex shell 的 CPU-only、NVML 或 `/dev/dxg` 结果判断宿主 GPU 是否可用。
 - 宿主 `workspace-write` 会把项目内 `.git`、`.agents`、`.codex` 设为只读；项目需要 Git 写入时应启用 Bubblewrap 沙箱，而不是放宽 Codex 默认沙箱。
 
@@ -144,7 +142,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - Container runner 必须用 `docker inspect` 验证容器状态和宿主项目目录的可写 bind mount。
 - MCP 参数使用 `argv: list[str]` 和项目相对 `cwd`；必须拒绝逃逸项目根目录的路径。
 - 单个 MCP 进程同一时刻只运行一个工具请求，并支持取消、超时、SIGTERM/SIGKILL 和持久化日志。
-- 当前配置不允许同一项目同时启用 Bubblewrap 沙箱和 Container。容器项目使用 Qoder 时不得提供宿主 Bash，只能暴露精确的 `container_run` MCP 工具。
+- 当前配置不允许同一项目同时启用 Bubblewrap 沙箱和 Container。容器项目命令只能通过 `container_run` MCP 工具执行。
 - Docker socket 等价于高权限宿主控制接口；不要弱化相关文档或校验。
 
 ## 已知兼容性约束
@@ -152,7 +150,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - Python 3.10 没有 `tomllib`；保留条件依赖 `tomli` 和 fallback import。
 - WSL/Python 3.10 的 `ThreadedChildWatcher` 可能卡住子进程；不要在没有对应回归测试的情况下移除 `SafeChildWatcher` 处理。
 - `lark-oapi` 的 WebSocket 客户端会捕获事件循环。保持 Feishu SDK 在线程内部延迟导入，并保持 `cli._run_service()` 的延迟 service import。
-- Codex 与 Qoder 的流式 JSON 结构不完全相同；解析器应容忍未知事件、超长行和缺失最终消息。
+- Codex 的流式 JSON 结构可能变化；解析器应容忍未知事件、超长行和缺失最终消息。
 - 移动模块时要同时更新：相对导入、`pyproject.toml` scripts、适配器中的 `python -m ...` 路径和测试 patch 路径。
 - 项目级配置以 `sandbox_enabled`、`sandbox_gpu`、`sandbox_network`、`sandbox_timeout_seconds` 为准；旧 `gpu_enabled`/`gpu_network`/`gpu_timeout_seconds`、`[projects.<alias>.gpu]` 表和 `[service].gpu_git_*`/`gpu_ssh_*` 仍可读取，等价于开启 GPU 透传，但不能与新键混用。
 - `gpu_jobs` 表已重命名为 `sandbox_jobs`；迁移必须保留历史作业记录且可重复执行。
@@ -207,7 +205,7 @@ Scheduler ──> AgentAdapter ──> Codex/Qoder process
 - `tests/test_config.py`：TOML、白名单、sandbox_/gpu_ 兼容键、沙箱与 Container 互斥和边界值。
 - `tests/test_router_and_state.py`：命令路由、鉴权、去重、任务选择和 SQLite 状态。
 - `tests/test_scheduler.py`：claim、并发、进度、恢复和停止信号。
-- `tests/test_adapters.py`：Codex/Qoder argv、session、MCP 注入和 JSON 流解析。
+- `tests/test_adapters.py`：Codex argv、session、MCP 注入和 JSON 流解析。
 - `tests/test_feishu.py`：飞书事件规范化；不连接真实飞书。
 - `tests/test_transfer.py`：注入项目的 send-to-feishu 脚本与 spool 投递；`tests/test_media.py`：路径/大小校验与附件分类。
 - `tests/test_service.py`：outbox 失败重试上限、跳过通知与队列推进。

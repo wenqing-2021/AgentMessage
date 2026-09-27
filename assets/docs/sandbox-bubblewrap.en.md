@@ -1,6 +1,6 @@
 # Bubblewrap Sandbox
 
-AgentMessage can run project commands for Codex or Qoder through the controlled `sandbox_run` MCP tool: dependency installs, builds, tests, training, and Git writes all happen inside one project-scoped Bubblewrap sandbox. Codex's own `workspace-write` sandbox keeps the project `.git` directory read-only, so projects that need commits or pushes should enable this sandbox.
+AgentMessage can run project commands for Codex through the controlled `sandbox_run` MCP tool: dependency installs, builds, tests, training, and Git writes all happen inside one project-scoped Bubblewrap sandbox. Codex's own `workspace-write` sandbox keeps the project `.git` directory read-only, so projects that need commits or pushes should enable this sandbox.
 
 ## Prerequisites
 
@@ -22,8 +22,8 @@ Add this to the target project in `config/projects.toml`:
 ```toml
 [projects.your_proj_name]
 path = "/home/alice/workspace/your_proj_name"
-default_agent = "qoder"
-allowed_agents = ["codex", "qoder"]
+default_agent = "codex"
+allowed_agents = ["codex"]
 sandbox_enabled = true
 sandbox_gpu = false
 sandbox_network = true

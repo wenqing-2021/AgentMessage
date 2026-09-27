@@ -1,5 +1,5 @@
 [Unit]
-Description=Feishu bridge for Codex and Qoder CLI tasks
+Description=Feishu bridge for Codex CLI tasks
 After=network-online.target
 Wants=network-online.target
 

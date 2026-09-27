@@ -36,7 +36,7 @@ Options:
   --yes               Skip the final uninstall confirmation.
   -h, --help          Show this help.
 
-systemd, uv, Codex, Qoder, Docker, and Bubblewrap are not removed.
+systemd, uv, Codex, Docker, and Bubblewrap are not removed.
 EOF
 }
 
@@ -199,7 +199,7 @@ print_summary() {
     else
         info "Project configuration, task state, logs, and Feishu credentials were deleted."
     fi
-    info "systemd, uv, Codex, Qoder, Docker, and Bubblewrap were left installed."
+    info "systemd, uv, Codex, Docker, and Bubblewrap were left installed."
 }
 
 main() {
