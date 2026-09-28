@@ -96,6 +96,11 @@ class BridgeService:
             )
             self.state.mark_outbox_terminal(message.id, "file missing before send")
             return False
+        if self.config.bots and not any(
+            path.resolve().is_relative_to(project.path) for project in self.config.projects.values()
+        ):
+            self.state.mark_outbox_terminal(message.id, "project access revoked before send")
+            return False
         await asyncio.to_thread(self._send_media, message.chat_id, message.kind, path)
         return True
 

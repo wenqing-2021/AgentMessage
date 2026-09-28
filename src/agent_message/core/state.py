@@ -49,6 +49,13 @@ class StateStore:
         self._connection.execute("PRAGMA journal_mode = WAL")
         self._connection.execute("PRAGMA busy_timeout = 5000")
         self._migrate()
+        # A connection-local view enforces the current registry even for old tasks
+        # whose project was removed from this bot; the persistent schema is unchanged.
+        aliases = ",".join("'" + alias.replace("'", "''") + "'" for alias in config.projects)
+        self._connection.execute(
+            "CREATE TEMP VIEW codex_tasks AS SELECT * FROM main.codex_tasks "
+            f"WHERE project_alias IN ({aliases})"
+        )
 
     def close(self) -> None:
         with self._lock:

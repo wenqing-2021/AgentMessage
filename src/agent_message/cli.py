@@ -31,6 +31,7 @@ from .runtimes.sandbox.runner import (
 
 
 def _config_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--app-id", help="select a configured Feishu bot App ID")
     parser.add_argument(
         "--config",
         default="config/projects.toml",
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     for direction in ("sync-feishu-to-codex", "sync-codex-to-feishu"):
         child = subcommands.add_parser(direction, help="sync an idle, non-archived Codex session")
         child.add_argument("--config", default="config/projects.toml", help=argparse.SUPPRESS)
+        child.add_argument("--app-id", help=argparse.SUPPRESS)
         child.add_argument("session", metavar="TASK_ID" if direction == "sync-feishu-to-codex" else "TITLE",
                            help="Feishu task ID" if direction == "sync-feishu-to-codex" else "Codex Chats title (full or partial)")
         child.add_argument("--codex-home", type=Path,
@@ -102,7 +104,6 @@ def _command_output(
     return completed.returncode, (completed.stdout + completed.stderr)
 
 
-_SERVICE_UNITS = ("agent-message.service", "agent-message-ssh-agent.service")
 _SERVICE_LABELS = ("本体", "SSH agent")
 _KNOWN_UNIT_STATES = frozenset(
     {"active", "activating", "deactivating", "inactive", "failed", "reloading", "unknown"}
@@ -114,19 +115,20 @@ def _runtime_dir() -> Path:
     return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 
 
-def _systemd_user_services() -> tuple[str, list[str]]:
+def _systemd_user_services(bridge_service: str = "agent-message.service") -> tuple[str, list[str]]:
     """Describe the bridge and SSH agent units; the second item lists inactive ones."""
+    units = (bridge_service, "agent-message-ssh-agent.service")
     try:
-        _, output = _command_output(["systemctl", "--user", "is-active", *_SERVICE_UNITS])
+        _, output = _command_output(["systemctl", "--user", "is-active", *units])
     except (OSError, subprocess.TimeoutExpired):
         return "无法确认（systemctl 不可用）", []
     states = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(states) != len(_SERVICE_UNITS) or any(
+    if len(states) != len(units) or any(
         state not in _KNOWN_UNIT_STATES for state in states
     ):
         return "无法确认（systemctl --user 不可用）", []
     summary = "，".join(f"{label} {state}" for label, state in zip(_SERVICE_LABELS, states))
-    inactive = [unit for unit, state in zip(_SERVICE_UNITS, states) if state != "active"]
+    inactive = [unit for unit, state in zip(units, states) if state != "active"]
     return summary, inactive
 
 
@@ -342,8 +344,9 @@ def command_doctor(
     config_path: str,
     sandbox_project: str | None = None,
     container_project: str | None = None,
+    app_id: str | None = None,
 ) -> int:
-    config = load_config(config_path)
+    config = load_config(config_path, app_id=app_id)
     if sandbox_project and container_project:
         print("沙箱检查与容器检查一次只能选择一个。", file=sys.stderr)
         return 2
@@ -404,7 +407,10 @@ def command_doctor(
         "飞书凭证："
         + ("已设置" if config.app_id and config.app_secret else "缺失（仅 run 命令需要）")
     )
-    services, inactive_services = _systemd_user_services()
+    bridge_service = "agent-message.service"
+    if config.selected_app_id and config.selected_app_id != config.primary_app_id:
+        bridge_service = f"agent-message-bot-{config.selected_app_id}.service"
+    services, inactive_services = _systemd_user_services(bridge_service)
     print(f"systemd 用户服务：{services}")
     if inactive_services:
         print(f"  重启：systemctl --user restart {' '.join(inactive_services)}")
@@ -425,8 +431,8 @@ def command_doctor(
     return 0
 
 
-def command_tasks(config_path: str) -> int:
-    config = load_config(config_path)
+def command_tasks(config_path: str, app_id: str | None = None) -> int:
+    config = load_config(config_path, app_id=app_id)
     state = StateStore(config)
     try:
         tasks = state.list_tasks()
@@ -443,8 +449,8 @@ def command_tasks(config_path: str) -> int:
     return 0
 
 
-def command_authorize(config_path: str, open_id: str) -> int:
-    config = load_config(config_path)
+def command_authorize(config_path: str, open_id: str, app_id: str | None = None) -> int:
+    config = load_config(config_path, app_id=app_id)
     state = StateStore(config)
     try:
         state.authorize(open_id)
@@ -454,8 +460,8 @@ def command_authorize(config_path: str, open_id: str) -> int:
     return 0
 
 
-def command_pending_senders(config_path: str) -> int:
-    config = load_config(config_path)
+def command_pending_senders(config_path: str, app_id: str | None = None) -> int:
+    config = load_config(config_path, app_id=app_id)
     state = StateStore(config)
     try:
         senders = state.recent_senders()
@@ -469,8 +475,8 @@ def command_pending_senders(config_path: str) -> int:
     return 0
 
 
-def command_resume(config_path: str, task_id: str) -> int:
-    config = load_config(config_path)
+def command_resume(config_path: str, task_id: str, app_id: str | None = None) -> int:
+    config = load_config(config_path, app_id=app_id)
     state = StateStore(config)
     try:
         task = state.get_task(task_id)
@@ -540,7 +546,7 @@ def main(argv: list[str] | None = None) -> None:
             from .orchestration.session_sync import sync_codex_to_feishu, sync_feishu_to_codex
             import sqlite3
 
-            state = StateStore(load_config(args.config))
+            state = StateStore(load_config(args.config, app_id=args.app_id))
             try:
                 codex = CodexSessionStore(args.codex_home)
                 if args.command == "sync-feishu-to-codex":
@@ -555,17 +561,17 @@ def main(argv: list[str] | None = None) -> None:
                 state.close()
             return
         if args.command == "doctor":
-            raise SystemExit(command_doctor(args.config, args.sandbox_project, args.container))
+            raise SystemExit(command_doctor(args.config, args.sandbox_project, args.container, args.app_id))
         if args.command == "tasks":
-            raise SystemExit(command_tasks(args.config))
+            raise SystemExit(command_tasks(args.config, args.app_id))
         if args.command == "authorize":
-            raise SystemExit(command_authorize(args.config, args.open_id))
+            raise SystemExit(command_authorize(args.config, args.open_id, args.app_id))
         if args.command == "pending-senders":
-            raise SystemExit(command_pending_senders(args.config))
+            raise SystemExit(command_pending_senders(args.config, args.app_id))
         if args.command == "resume":
-            raise SystemExit(command_resume(args.config, args.task_id))
+            raise SystemExit(command_resume(args.config, args.task_id, args.app_id))
         if args.command == "run":
-            config = load_config(args.config)
+            config = load_config(args.config, app_id=args.app_id)
             asyncio.run(_run_service(config))
             return
         raise AssertionError(f"unknown command: {args.command}")

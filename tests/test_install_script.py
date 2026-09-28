@@ -15,6 +15,81 @@ INSTALLER = ROOT / "install.sh"
 
 
 class InstallScriptTests(unittest.TestCase):
+    def test_existing_install_default_only_shows_information(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            shell = r'''
+source "$1"
+CONFIG_DIR="$2/config"
+ENV_FILE="$CONFIG_DIR/feishu.env"
+UNIT_FILE="$2/agent-message.service"
+mkdir -p "$CONFIG_DIR"
+write_credentials_file cli_primary secret_hidden ''
+touch "$UNIT_FILE"
+prompt_plain() { PROMPT_VALUE=; }
+bootstrap_project() { exit 90; }
+install_user_service() { exit 91; }
+main
+'''
+            result = subprocess.run(["bash", "-c", shell, "bash", str(INSTALLER), temp],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Credentials:", result.stdout)
+            self.assertNotIn("secret_hidden", result.stdout)
+
+    def test_add_bot_reuses_checkout_config_and_ssh_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "home"
+            checkout = root / "repo"
+            (checkout / "config").mkdir(parents=True)
+            (checkout / ".venv/bin").mkdir(parents=True)
+            import shlex
+            import sys
+            interpreter = checkout / ".venv/bin/python"
+            interpreter.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+            interpreter.chmod(0o755)
+            shutil.copytree(ROOT / "deploy", checkout / "deploy")
+            for alias in ("alpha", "beta"):
+                (root / alias).mkdir()
+            (checkout / "config/projects.toml").write_text(
+                '[service]\ndefault_chat_project = "alpha"\n' + ''.join(
+                    f'[projects.{alias}]\npath = "{root / alias}"\n' for alias in ("alpha", "beta")
+                )
+            )
+            shell = r'''
+source "$1"
+set_install_dir "$2"
+write_credentials_file cli_primary secret_primary ou_primary
+count=0
+prompt_plain() {
+    count=$((count + 1))
+    case $count in 1) PROMPT_VALUE=cli_second;; 2) PROMPT_VALUE=beta;; esac
+}
+prompt_secret() { PROMPT_VALUE=secret_second; }
+require_running_systemd_user() { :; }
+systemctl() { printf '%s\n' "$*" >>"$INSTALL_DIR/systemctl.log"; }
+bootstrap_project() { exit 90; }
+checkout_project() { exit 91; }
+install_user_service() { write_user_service_file; }
+add_bot
+[[ $INSTALL_DIR == "$2" ]]
+[[ $PROJECT_CONFIG == "$2/config/projects.toml" ]]
+grep -q secret_primary "$CONFIG_DIR/feishu.env"
+grep -q secret_second "$CONFIG_DIR/bots/cli_second.env"
+grep -q 'agent-message-bot-cli_second.service' <<<"$UNIT_FILE"
+grep -q -- '--app-id "cli_second"' "$UNIT_FILE"
+grep -F "WorkingDirectory=$INSTALL_DIR" "$UNIT_FILE"
+[[ $SSH_AGENT_UNIT_FILE == "$SYSTEMD_USER_DIR/agent-message-ssh-agent.service" ]]
+[[ $(stat -c %a "$ENV_FILE") == 600 ]]
+'''
+            result = subprocess.run(["bash", "-c", shell, "bash", str(INSTALLER), str(checkout)],
+                env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+                     "PYTHONPATH": str(ROOT / "src")},
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(set(load_config(checkout / "config/projects.toml", app_id="cli_second").projects), {"beta"})
+            self.assertNotIn("secret_second", result.stdout)
+
     def test_bash_syntax_and_help(self) -> None:
         syntax = subprocess.run(
             ["bash", "-n", str(INSTALLER)],
@@ -176,7 +251,7 @@ install_ssh_agent_service
             )
 
             result = subprocess.run(
-                ["bash", str(INSTALLER), "--install-dir", str(install_dir)],
+                ["bash", str(INSTALLER), "--install-dir", str(install_dir), "--refresh-service"],
                 env=environment,
                 capture_output=True,
                 text=True,

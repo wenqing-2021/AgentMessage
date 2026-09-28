@@ -51,6 +51,8 @@ def sandbox_mcp_config_args(
         "--task-id",
         task_id,
     ]
+    if config.selected_app_id:
+        server_args.extend(["--app-id", config.selected_app_id])
     if run_id is not None:
         server_args.extend(["--run-id", str(run_id)])
     root = config.config_path.parent.parent
@@ -92,6 +94,8 @@ def container_mcp_config_args(
         "--task-id",
         task_id,
     ]
+    if config.selected_app_id:
+        server_args.extend(["--app-id", config.selected_app_id])
     if run_id is not None:
         server_args.extend(["--run-id", str(run_id)])
     root = config.config_path.parent.parent

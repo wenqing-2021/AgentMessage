@@ -23,14 +23,15 @@ SERVER_VERSION = "0.1.0"
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-message-sandbox-mcp")
     parser.add_argument("--config", required=True)
+    parser.add_argument("--app-id")
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--run-id", type=int)
     return parser
 
 
 class SandboxMcpServer:
-    def __init__(self, config_path: str, task_id: str, run_id: int | None) -> None:
-        self.config = load_config(config_path)
+    def __init__(self, config_path: str, task_id: str, run_id: int | None, app_id: str | None = None) -> None:
+        self.config = load_config(config_path, app_id=app_id)
         self.state = StateStore(self.config)
         self.task = self.state.get_task(task_id)
         if self.task is None:
@@ -256,7 +257,7 @@ class SandboxMcpServer:
 def main() -> None:
     args = _parser().parse_args()
     try:
-        SandboxMcpServer(args.config, args.task_id, args.run_id).run()
+        SandboxMcpServer(args.config, args.task_id, args.run_id, args.app_id).run()
     except (ConfigError, OSError, ValueError) as exc:
         print(f"agent-message sandbox MCP failed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

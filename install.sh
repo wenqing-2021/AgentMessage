@@ -17,6 +17,8 @@ SSH_AGENT_LOADER_FILE="$SSH_AGENT_LOADER_DIR/load_ssh_keys.py"
 PROJECT_CONFIG="$INSTALL_DIR/config/projects.toml"
 STATE_FILE="$INSTALL_DIR/.git/agent-message-install-stage"
 REFRESH_SERVICE=false
+BOT_APP_ID=
+OVERWRITE=false
 
 info() {
     printf '[AgentMessage] %s\n' "$*"
@@ -33,13 +35,13 @@ die() {
 
 usage() {
     cat <<'EOF'
-Usage: bash install.sh [--install-dir PATH] [--refresh-service]
+Usage: bash install.sh [--install-dir PATH] [--app-id ID] [--refresh-service]
 
 Clone and install AgentMessage, collect Feishu credentials, and enable its
 systemd user services. The default install directory is ~/workspace/AgentMessage.
 The bridge unit plus the dedicated SSH agent service and its key loader are
-installed and enabled together. Re-running the same command resumes from the
-last completed stage.
+installed and enabled together. Re-running offers overwrite, add a bot using the same checkout, or show info.
+Interrupted first-time installations resume from the last completed stage.
 Use --refresh-service to reinstall the systemd units from this script and the
 deploy/ templates without repeating the other stages.
 EOF
@@ -49,6 +51,69 @@ set_install_dir() {
     INSTALL_DIR=$1
     PROJECT_CONFIG="$INSTALL_DIR/config/projects.toml"
     STATE_FILE="$INSTALL_DIR/.git/agent-message-install-stage"
+}
+
+select_bot() {
+    BOT_APP_ID=$1
+    [[ $BOT_APP_ID =~ ^cli_[A-Za-z0-9_-]{1,100}$ ]] || die "Invalid App ID."
+    ENV_FILE="$CONFIG_DIR/bots/$BOT_APP_ID.env"
+    UNIT_FILE="$SYSTEMD_USER_DIR/agent-message-bot-$BOT_APP_ID.service"
+    SSH_AGENT_DROPIN_DIR="$UNIT_FILE.d"
+    SSH_AGENT_DROPIN_FILE="$SSH_AGENT_DROPIN_DIR/ssh-agent.conf"
+}
+
+show_installation() {
+    printf 'Repository: %s\nProjects: %s\nCredentials: %s\nService: %s\n' \
+        "$INSTALL_DIR" "$PROJECT_CONFIG" "$ENV_FILE" "${UNIT_FILE##*/}"
+    local credential app_id
+    for credential in "$CONFIG_DIR/bots"/cli_*.env; do
+        [[ -f $credential ]] || continue
+        app_id=${credential##*/}
+        app_id=${app_id%.env}
+        printf 'Bot: %s (agent-message-bot-%s.service)\n' "$app_id" "$app_id"
+    done
+}
+
+add_bot() {
+    local primary_id new_id new_secret aliases
+    [[ -x $INSTALL_DIR/.venv/bin/python && -f $PROJECT_CONFIG ]] || die "Complete the primary installation first."
+    primary_id=$(read_env_value AGENT_MESSAGE_FEISHU_APP_ID)
+    [[ -n $primary_id ]] || die "Complete the primary bot installation first."
+    prompt_plain 'New bot App ID'
+    new_id=$PROMPT_VALUE
+    [[ $new_id =~ ^cli_[A-Za-z0-9_-]{1,100}$ ]] || die "Invalid App ID."
+    [[ $new_id != "$primary_id" ]] || die "The bot already exists."
+    [[ ! -e $CONFIG_DIR/bots/$new_id.env && ! -e $SYSTEMD_USER_DIR/agent-message-bot-$new_id.service ]] || die "The bot already exists."
+    prompt_secret 'New bot App Secret (input hidden)'
+    new_secret=$PROMPT_VALUE
+    validate_credential AGENT_MESSAGE_FEISHU_APP_SECRET "$new_secret"
+    prompt_plain "Existing project aliases for the new bot (comma-separated; keep the primary bot's default project)"
+    aliases=$PROMPT_VALUE
+    require_running_systemd_user
+    "$INSTALL_DIR/.venv/bin/python" -m agent_message.core.bot_registry \
+        --config "$PROJECT_CONFIG" --primary-app-id "$primary_id" --app-id "$new_id" --projects "$aliases"
+    select_bot "$new_id"
+    write_credentials_file "$new_id" "$new_secret" ''
+    # Both processes use this checkout and the same projects.toml. Reload the primary
+    # bridge before starting the new one so its previous project whitelist is gone.
+    systemctl --user restart agent-message.service
+    install_user_service
+    print_summary
+}
+
+choose_existing_installation() {
+    show_installation
+    prompt_plain 'Existing installation found: 1) Overwrite credentials and reinstall services 2) Add a bot (shared code and project configuration) 3) Show installation info and exit [3]'
+    case ${PROMPT_VALUE:-3} in
+        1) OVERWRITE=true ;;
+        2)
+            [[ -z $BOT_APP_ID ]] || die "Add bots from the primary installation."
+            add_bot
+            exit 0
+            ;;
+        3) exit 0 ;;
+        *) die "Invalid selection; nothing changed." ;;
+    esac
 }
 
 run_as_root() {
@@ -211,7 +276,9 @@ write_credentials_file() {
     local app_id=$1 app_secret=$2 allowed_open_ids=$3 temporary
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
-    temporary=$(mktemp "$CONFIG_DIR/feishu.env.XXXXXX")
+    mkdir -p "$(dirname "$ENV_FILE")"
+    chmod 700 "$(dirname "$ENV_FILE")"
+    temporary=$(mktemp "${ENV_FILE}.XXXXXX")
     umask 077
     {
         printf 'AGENT_MESSAGE_FEISHU_APP_ID=%s\n' "$app_id"
@@ -248,6 +315,20 @@ collect_credentials() {
     app_secret=$(read_env_value AGENT_MESSAGE_FEISHU_APP_SECRET)
     allowed_open_ids=$(read_env_value AGENT_MESSAGE_ALLOWED_OPEN_IDS)
 
+    if [[ $OVERWRITE == true ]]; then
+        prompt_plain "AGENT_MESSAGE_FEISHU_APP_ID"
+        app_id=$PROMPT_VALUE
+        validate_credential AGENT_MESSAGE_FEISHU_APP_ID "$app_id"
+        if [[ -z $BOT_APP_ID && $app_id != $(read_env_value AGENT_MESSAGE_FEISHU_APP_ID) ]] &&
+            [[ -d $CONFIG_DIR/bots ]]; then
+            die "Keep the primary App ID when additional bots exist; change its Secret or add another bot."
+        fi
+        [[ -z $BOT_APP_ID || $app_id == "$BOT_APP_ID" ]] || die "App ID must match the selected bot."
+        prompt_secret "AGENT_MESSAGE_FEISHU_APP_SECRET (input hidden)"
+        app_secret=$PROMPT_VALUE
+        validate_credential AGENT_MESSAGE_FEISHU_APP_SECRET "$app_secret"
+        write_credentials_file "$app_id" "$app_secret" "$allowed_open_ids"
+    fi
     if [[ -z $app_id ]]; then
         prompt_plain "AGENT_MESSAGE_FEISHU_APP_ID"
         app_id=$PROMPT_VALUE
@@ -328,6 +409,8 @@ write_user_service_file() {
     escaped_env=$(systemd_path_value "$ENV_FILE")
     quoted_executable=$(systemd_quote "$INSTALL_DIR/.venv/bin/agent-message")
     quoted_config=$(systemd_quote "$PROJECT_CONFIG")
+    local bot_args=
+    [[ -z $BOT_APP_ID ]] || bot_args=" --app-id $(systemd_quote "$BOT_APP_ID")"
     path_value=$(service_path)
     quoted_path=$(systemd_quote "PATH=$path_value")
 
@@ -341,7 +424,7 @@ write_user_service_file() {
             line=${line//@AGENT_MESSAGE_WORKING_DIRECTORY@/$escaped_install}
             line=${line//@AGENT_MESSAGE_ENV_FILE@/$escaped_env}
             line=${line//@AGENT_MESSAGE_PATH@/$quoted_path}
-            line=${line//@AGENT_MESSAGE_EXEC_START@/$quoted_executable run --config $quoted_config}
+            line=${line//@AGENT_MESSAGE_EXEC_START@/$quoted_executable run --config $quoted_config$bot_args}
             printf '%s\n' "$line"
         done <"$template"
     } >"$temporary"
@@ -378,8 +461,8 @@ install_user_service() {
         warn "The dedicated SSH agent service did not start; sandbox SSH push/pull needs a running agent"
         warn "Check that ssh-agent is installed and ~/.ssh is readable, then rerun with --refresh-service."
     fi
-    systemctl --user enable agent-message.service
-    systemctl --user restart agent-message.service
+    systemctl --user enable "${UNIT_FILE##*/}"
+    systemctl --user restart "${UNIT_FILE##*/}"
     info "systemd user services enabled and restarted."
 }
 
@@ -395,14 +478,15 @@ AgentMessage installation is complete.
   Repository:  $INSTALL_DIR
   Projects:    $PROJECT_CONFIG
   Credentials: $ENV_FILE
+  Service:     ${UNIT_FILE##*/}
   SSH agent:   $SSH_AGENT_UNIT_FILE
 
 Next:
   1. Log in to Codex with "codex login".
   2. Edit the project allowlist: vim "$PROJECT_CONFIG"
   3. Send /help to the Feishu bot, then authorize yourself with:
-       cd "$INSTALL_DIR" && uv run agent-message pending-senders
-       cd "$INSTALL_DIR" && uv run agent-message authorize ou_xxx
+       cd "$INSTALL_DIR" && uv run agent-message pending-senders${BOT_APP_ID:+ --app-id $BOT_APP_ID}
+       cd "$INSTALL_DIR" && uv run agent-message authorize ou_xxx${BOT_APP_ID:+ --app-id $BOT_APP_ID}
   4. Update later with: cd "$INSTALL_DIR" && bash update.sh
 EOF
 }
@@ -413,6 +497,11 @@ main() {
             --install-dir)
                 (($# >= 2)) || die "--install-dir requires a path."
                 set_install_dir "$2"
+                shift 2
+                ;;
+            --app-id)
+                (($# >= 2)) || die "--app-id requires an App ID."
+                select_bot "$2"
                 shift 2
                 ;;
             --refresh-service)
@@ -442,6 +531,15 @@ main() {
         return 0
     fi
 
+    if [[ -f $UNIT_FILE || $(read_stage) == complete ]]; then
+        choose_existing_installation
+    fi
+    if [[ $OVERWRITE == true ]]; then
+        collect_credentials
+        install_user_service
+        print_summary
+        return 0
+    fi
     while true; do
         case $(read_stage) in
             bootstrap)

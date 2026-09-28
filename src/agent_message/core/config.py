@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
 try:  # Python 3.11+
@@ -67,21 +68,36 @@ class ServiceConfig:
 
 
 @dataclass(frozen=True)
+class BotConfig:
+    app_id: str
+    projects: tuple[str, ...]
+    default_chat_project: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     config_path: Path
     projects: dict[str, ProjectConfig]
     service: ServiceConfig
+    bots: dict[str, BotConfig] = field(default_factory=dict)
+    primary_app_id: str | None = None
+    selected_app_id: str | None = None
 
     @property
     def app_id(self) -> str | None:
-        return os.environ.get("AGENT_MESSAGE_FEISHU_APP_ID")
+        return self.selected_app_id or os.environ.get("AGENT_MESSAGE_FEISHU_APP_ID")
 
     @property
     def app_secret(self) -> str | None:
+        credential_app = os.environ.get("AGENT_MESSAGE_FEISHU_APP_ID")
+        if self.selected_app_id and credential_app != self.selected_app_id:
+            return None
         return os.environ.get("AGENT_MESSAGE_FEISHU_APP_SECRET")
 
     @property
     def configured_open_ids(self) -> frozenset[str]:
+        if self.selected_app_id and os.environ.get("AGENT_MESSAGE_FEISHU_APP_ID") != self.selected_app_id:
+            return frozenset()
         raw = os.environ.get("AGENT_MESSAGE_ALLOWED_OPEN_IDS", "")
         return frozenset(item.strip() for item in raw.split(",") if item.strip())
 
@@ -99,7 +115,7 @@ def _parse_agent(value: object, label: str) -> AgentKind:
         raise ConfigError(f"{label} must be one of: {allowed}") from exc
 
 
-def load_config(path: str | Path) -> AppConfig:
+def load_config(path: str | Path, *, app_id: str | None = None) -> AppConfig:
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
         raise ConfigError(
@@ -368,7 +384,42 @@ def load_config(path: str | Path) -> AppConfig:
             f"[service].default_chat_project is unknown: {default_chat_project}. "
             f"Available projects: {aliases}"
         )
-    return AppConfig(
+    bots: dict[str, BotConfig] = {}
+    bots_raw = raw.get("bots", {})
+    if not isinstance(bots_raw, dict):
+        raise ConfigError("[bots] must be a TOML table")
+    primary_app_id = service_raw.get("feishu_app_id")
+    if bots_raw:
+        if not isinstance(primary_app_id, str) or primary_app_id not in bots_raw:
+            raise ConfigError("[service].feishu_app_id must name a configured bot")
+        for bot_id, bot_raw in bots_raw.items():
+            if not re.fullmatch(r"cli_[A-Za-z0-9_-]{1,100}", bot_id):
+                raise ConfigError("bot App IDs must start with cli_ and contain only letters, digits, _ or -")
+            if not isinstance(bot_raw, dict):
+                raise ConfigError(f"bots.{bot_id} must be a table")
+            if set(bot_raw) - {"projects", "default_chat_project"}:
+                raise ConfigError(f"bots.{bot_id} only accepts projects and default_chat_project; keep secrets in the environment file")
+            aliases = bot_raw.get("projects")
+            if (not isinstance(aliases, list) or not aliases
+                    or any(not isinstance(alias, str) or alias not in projects for alias in aliases)
+                    or len(set(aliases)) != len(aliases)):
+                raise ConfigError(f"bots.{bot_id}.projects must be a non-empty list of unique configured aliases")
+            default_alias = bot_raw.get("default_chat_project", aliases[0])
+            if not isinstance(default_alias, str) or default_alias not in aliases:
+                raise ConfigError(f"bots.{bot_id}.default_chat_project must belong to its projects")
+            bots[bot_id] = BotConfig(bot_id, tuple(aliases), default_alias)
+        owners: list[tuple[Path, str]] = []
+        for bot in bots.values():
+            for alias in bot.projects:
+                path = projects[alias].path
+                if any(owner != bot.app_id and (path == other or path.is_relative_to(other)
+                       or other.is_relative_to(path)) for other, owner in owners):
+                    raise ConfigError("projects assigned to different bots must not overlap on disk")
+                owners.append((path, bot.app_id))
+    elif primary_app_id is not None:
+        raise ConfigError("[service].feishu_app_id requires [bots.<app_id>] entries")
+
+    config = AppConfig(
         config_path=config_path,
         projects=projects,
         service=ServiceConfig(
@@ -379,4 +430,20 @@ def load_config(path: str | Path) -> AppConfig:
             sandbox_ssh_known_hosts=ssh_paths.get("ssh_known_hosts"),
             sandbox_readonly_paths=readonly_paths,
         ),
+        bots=bots,
+        primary_app_id=primary_app_id,
     )
+    if not bots:
+        if app_id is not None:
+            raise ConfigError("--app-id requires configured [bots.<app_id>] entries")
+        return config
+    selected = app_id or primary_app_id
+    if selected not in bots:
+        raise ConfigError(f"unknown bot App ID: {selected}")
+    bot = bots[selected]
+    service = replace(config.service, default_chat_project=bot.default_chat_project)
+    if selected != primary_app_id:
+        service = replace(service, state_dir=service.state_dir / "bots" / selected,
+                          log_dir=service.log_dir / "bots" / selected)
+    return replace(config, projects={alias: projects[alias] for alias in bot.projects},
+                   service=service, selected_app_id=selected)

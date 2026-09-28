@@ -53,6 +53,26 @@ class UninstallScriptTests(unittest.TestCase):
         )
         return install_dir, environment
 
+    def test_shared_checkout_stops_additional_bots_before_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            install_dir, environment = self._fixture(Path(temp))
+            root = Path(temp)
+            log = root / "systemctl.log"
+            (root / "bin/systemctl").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit 0\n')
+            config_home = Path(environment["XDG_CONFIG_HOME"])
+            credentials = config_home / "agent-message/bots"
+            credentials.mkdir()
+            (credentials / "cli_second.env").write_text("test secret\n")
+            unit = config_home / "systemd/user/agent-message-bot-cli_second.service"
+            unit.write_text("# Managed by AgentMessage install.sh\n")
+            result = subprocess.run(["bash", str(UNINSTALLER), "--install-dir", str(install_dir),
+                "--purge-data", "--yes"], env=environment, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--user stop agent-message-bot-cli_second.service", log.read_text())
+            self.assertFalse(unit.exists())
+            self.assertFalse(install_dir.exists())
+            self.assertFalse(credentials.exists())
+
     def test_bash_syntax_and_help(self) -> None:
         syntax = subprocess.run(
             ["bash", "-n", str(UNINSTALLER)],
@@ -211,7 +231,7 @@ class UninstallScriptTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("删除 AgentMessage 及其全部本地数据", result.stdout)
+            self.assertIn("Remove AgentMessage and all its local data", result.stdout)
             self.assertIn("Uninstall cancelled", result.stdout)
             self.assertTrue(install_dir.exists())
 

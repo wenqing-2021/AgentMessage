@@ -45,24 +45,24 @@ EOF
 
 pull_latest() {
     if [[ $PULL != true ]]; then
-        info "已跳过 git pull（--no-pull）。"
+        info "Skipping git pull (--no-pull)."
         return 0
     fi
     if [[ ! -d $INSTALL_DIR/.git ]]; then
-        info "该目录不是 git 检出，跳过 git pull。"
+        info "This directory is not a Git checkout; skipping git pull."
         return 0
     fi
     if [[ -n $(git -C "$INSTALL_DIR" status --porcelain) ]]; then
-        warn "检测到未提交的本地改动，已跳过 git pull；需要更新时请先提交或 git stash。"
+        warn "Uncommitted changes found; skipping git pull. Commit or stash them before pulling updates."
         return 0
     fi
-    info "拉取最新代码 ..."
+    info "Pulling the latest code ..."
     git -C "$INSTALL_DIR" pull --ff-only
 }
 
 sync_dependencies() {
-    command -v uv >/dev/null 2>&1 || die "找不到 uv，无法同步依赖。"
-    info "同步 Python 依赖（uv sync --frozen）..."
+    command -v uv >/dev/null 2>&1 || die "uv was not found; cannot sync dependencies."
+    info "Syncing Python dependencies (uv sync --frozen) ..."
     (cd "$INSTALL_DIR" && uv sync --frozen)
 }
 
@@ -83,15 +83,15 @@ refresh_units() {
     if unit_templates_current; then
         return 0
     fi
-    info "deploy/ 中的 service 有改动，重新安装受管文件 ..."
+    info "Managed service files need updating; reinstalling them ..."
     bash "$INSTALL_DIR/install.sh" --install-dir "$INSTALL_DIR" --refresh-service
 }
 
 restart_unit() {
     local unit=$1
-    info "重启 $unit ..."
+    info "Restarting $unit ..."
     if ! systemctl --user restart "$unit"; then
-        warn "重启 $unit 失败；请在 systemd 用户会话可用的终端中执行：systemctl --user restart $unit"
+        warn "Failed to restart $unit. Run this in a terminal with an active systemd user session: systemctl --user restart $unit"
         FAILED=true
     fi
 }
@@ -99,8 +99,8 @@ restart_unit() {
 print_key_hint() {
     cat <<EOF
 
-[AgentMessage] 提示：重启专用 SSH agent 会清空已手动解锁的密钥。
-  有口令的私钥需要重新解锁：
+[AgentMessage] Note: restarting the dedicated SSH agent clears manually unlocked keys.
+  Unlock passphrase-protected private keys again with:
       SSH_AUTH_SOCK="$SSH_AGENT_SOCKET" ssh-add ~/.ssh/your_encrypted_key
 EOF
 }
@@ -108,12 +108,12 @@ EOF
 print_service_status() {
     local -a states=()
     mapfile -t states < <(systemctl --user is-active "$SSH_AGENT_SERVICE" "$BRIDGE_SERVICE" 2>/dev/null || true)
-    info "服务状态："
-    printf '  %s: %s\n' "$SSH_AGENT_SERVICE" "${states[0]:-未知}"
-    printf '  %s: %s\n' "$BRIDGE_SERVICE" "${states[1]:-未知}"
+    info "Service status:"
+    printf '  %s: %s\n' "$SSH_AGENT_SERVICE" "${states[0]:-unknown}"
+    printf '  %s: %s\n' "$BRIDGE_SERVICE" "${states[1]:-unknown}"
 
     if ! command -v ssh-add >/dev/null 2>&1; then
-        printf '  已加载密钥：无法确认（缺少 ssh-add）\n'
+        printf '  Loaded keys: unknown (ssh-add is missing)\n'
         return 0
     fi
     local output status
@@ -121,11 +121,11 @@ print_service_status() {
     if [[ $status == 0 ]]; then
         local loaded
         loaded=$(printf '%s\n' "$output" | sed '/^$/d' | wc -l | tr -d ' ')
-        printf '  已加载密钥：%s 把\n' "$loaded"
+        printf '  Loaded keys: %s\n' "$loaded"
     elif [[ $status == 1 ]]; then
-        printf '  已加载密钥：0 把\n'
+        printf '  Loaded keys: 0\n'
     else
-        printf '  已加载密钥：无法确认（agent 未就绪）\n'
+        printf '  Loaded keys: unknown (agent is not ready)\n'
     fi
 }
 
@@ -147,7 +147,7 @@ main() {
     done
 
     [[ -d $INSTALL_DIR/src/agent_message ]] ||
-        die "$INSTALL_DIR 不是 AgentMessage 仓库，无法更新。"
+        die "$INSTALL_DIR is not an AgentMessage checkout; cannot update."
 
     pull_latest
     sync_dependencies
@@ -155,14 +155,24 @@ main() {
 
     restart_unit "$SSH_AGENT_SERVICE"
     restart_unit "$BRIDGE_SERVICE"
+    local credential app_id unit
+    for credential in "$CONFIG_HOME/agent-message/bots"/cli_*.env; do
+        [[ -f $credential ]] || continue
+        app_id=${credential##*/}
+        app_id=${app_id%.env}
+        [[ $app_id =~ ^cli_[A-Za-z0-9_-]{1,100}$ ]] || die "Invalid bot credential filename."
+        unit="agent-message-bot-$app_id.service"
+        bash "$INSTALL_DIR/install.sh" --install-dir "$INSTALL_DIR" --app-id "$app_id" --refresh-service
+        info "$unit: $(systemctl --user is-active "$unit" || true)"
+    done
 
     print_service_status
     print_key_hint
 
     if [[ $FAILED == true ]]; then
-        die "部分服务未重启成功，请按上面的提示手动处理。"
+        die "Some services failed to restart. Follow the instructions above to resolve the issue."
     fi
-    info "更新完成。"
+    info "Update complete."
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

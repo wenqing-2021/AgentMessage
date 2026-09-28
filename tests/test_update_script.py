@@ -101,6 +101,17 @@ class UpdateScriptTests(unittest.TestCase):
         )
         return updater, log, environment
 
+    def test_shared_checkout_refreshes_additional_bot_services(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            updater, log, environment = self._fixture(Path(temp), units_current=True)
+            credentials = Path(environment["XDG_CONFIG_HOME"]) / "agent-message/bots"
+            credentials.mkdir(parents=True)
+            (credentials / "cli_second.env").write_text("not read by updater\n")
+            result = subprocess.run(["bash", str(updater)], env=environment,
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"install.sh --install-dir {updater.parent} --app-id cli_second --refresh-service", self.commands(log))
+
     def commands(self, log: Path) -> list[str]:
         return log.read_text().splitlines() if log.exists() else []
 
@@ -141,10 +152,10 @@ class UpdateScriptTests(unittest.TestCase):
             self.assertIn(f"git -C {updater.parent} pull --ff-only", commands)
             self.assertIn("ssh-add ~/.ssh/your_encrypted_key", result.stdout)
             # The script verifies the outcome itself instead of asking for a manual check.
-            self.assertIn("服务状态", result.stdout)
+            self.assertIn("Service status:", result.stdout)
             self.assertIn("agent-message-ssh-agent.service: active", result.stdout)
             self.assertIn("agent-message.service: active", result.stdout)
-            self.assertIn("已加载密钥：2 把", result.stdout)
+            self.assertIn("Loaded keys: 2", result.stdout)
             self.assertFalse([line for line in commands if line.startswith("install.sh")])
 
     def test_refreshes_units_only_when_templates_differ(self) -> None:
@@ -177,7 +188,7 @@ class UpdateScriptTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("未提交", result.stderr)
+            self.assertIn("Uncommitted changes", result.stderr)
             self.assertFalse([line for line in self.commands(log) if "pull" in line])
 
     def test_no_pull_flag_skips_git_entirely(self) -> None:

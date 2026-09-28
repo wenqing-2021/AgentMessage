@@ -74,7 +74,7 @@ normalize_and_validate_paths() {
 prompt_data_choice() {
     [[ -r /dev/tty ]] || die "Interactive selection requires a terminal; use --keep-data or --purge-data."
     local answer
-    printf '保留项目配置、任务数据库、日志和飞书凭证？[y/N]: ' >/dev/tty
+    printf 'Back up project configuration, task databases, logs, and Feishu credentials? [y/N]: ' >/dev/tty
     if ! IFS= read -r answer </dev/tty; then
         printf '\n' >/dev/tty
         exit 130
@@ -95,11 +95,11 @@ confirm_uninstall() {
     [[ -r /dev/tty ]] || die "Final confirmation requires a terminal; use --yes for automation."
     local answer action
     if [[ $KEEP_DATA == true ]]; then
-        action="备份数据后删除 AgentMessage"
+        action="Back up data and remove AgentMessage"
     else
-        action="删除 AgentMessage 及其全部本地数据"
+        action="Remove AgentMessage and all its local data"
     fi
-    printf '%s。确认继续？[y/N]: ' "$action" >/dev/tty
+    printf '%s. Continue? [y/N]: ' "$action" >/dev/tty
     if ! IFS= read -r answer </dev/tty; then
         printf '\n' >/dev/tty
         exit 130
@@ -115,6 +115,26 @@ confirm_uninstall() {
 }
 
 stop_and_remove_service() {
+    # Additional bots share this checkout. Stop them before deleting any code/data.
+    local credential app_id bot_unit bot_file bot_dropin
+    for credential in "$CONFIG_DIR/bots"/cli_*.env; do
+        [[ -f $credential ]] || continue
+        app_id=${credential##*/}
+        app_id=${app_id%.env}
+        [[ $app_id =~ ^cli_[A-Za-z0-9_-]{1,100}$ ]] || die "Invalid bot credential filename."
+        bot_unit="agent-message-bot-$app_id.service"
+        bot_file="${UNIT_FILE%/*}/$bot_unit"
+        [[ -f $bot_file ]] || continue
+        grep -q '^# Managed by AgentMessage install.sh$' "$bot_file" || die "Unmanaged bot unit: $bot_unit"
+        systemctl --user stop "$bot_unit" || die "Cannot stop $bot_unit; no code was removed."
+        systemctl --user disable "$bot_unit" >/dev/null 2>&1 || true
+        bot_dropin="$bot_file.d/ssh-agent.conf"
+        if [[ -f $bot_dropin ]] && grep -q '^# Managed by AgentMessage:' "$bot_dropin"; then
+            rm -f -- "$bot_dropin"
+            rmdir --ignore-fail-on-non-empty "$bot_file.d" 2>/dev/null || true
+        fi
+        rm -f -- "$bot_file"
+    done
     if command -v systemctl >/dev/null 2>&1 &&
         systemctl --user show-environment >/dev/null 2>&1; then
         if systemctl --user is-active --quiet agent-message.service; then
