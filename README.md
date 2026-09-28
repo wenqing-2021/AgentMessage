@@ -17,36 +17,47 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2ea44f" alt="MIT License"></a>
 </p>
 
-AgentMessage uses a Feishu long connection to forward direct bot messages to Codex CLI on WSL/Linux, then sends task progress and results back to Feishu. It requires no public IP address, open port, or callback URL.
+
+AgentMessage connects Feishu direct messages to Codex CLI on WSL/Linux. Run tasks in registered projects and receive progress, results, and files through a long connection—no public IP or open port required.
 
 ## 1. Features
 
-- **Feishu remote coding:** send tasks and receive progress and results without a public IP or open port.
-- **Codex:** run tasks in configured projects and resume the same session from your terminal.
-- **Persistent conversations:** queue tasks, track status and logs, and stop work from Feishu; different projects can run concurrently.
-- **Model controls:** switch Codex models and reasoning effort, and compact context without starting a new session.
-- **Bubblewrap sandbox and Docker:** give any project a controlled sandbox with writable Git metadata, and enable GPU passthrough per project.
-- **Access control:** authorize users and restrict work to registered projects.
+- **Task management:** ongoing conversations, task switching, queues, logs, and cancellation; concurrent work across projects.
+- **Model controls:** switch models and reasoning effort, and compact context while keeping the session.
+- **File exchange:** send images or files to the Agent and receive project files back.
+- **Session continuity:** resume tasks in a terminal and sync sessions between Feishu and Codex Chats.
+- **Isolated execution:** Bubblewrap with optional GPU passthrough, or an existing Docker container.
+- **Multiple bots:** shared code with separate project assignments and user authorization.
 
 ## 2. Configure Feishu
 
 Open the [Feishu Developer Console](https://open.feishu.cn/app):
 
 1. Create an enterprise self-built app and add the bot capability.
-2. Grant `im:message.p2p_msg:readonly` and `im:message:send_as_bot`.
+2. Batch-import the following JSON in permission management.
 3. Select long-connection event delivery and add `im.message.receive_v1`.
-4. Create and publish an app version, restricting the bot's availability to yourself.
-5. Keep the App ID and App Secret ready. The installer asks for them in the terminal and does not echo the Secret.
+4. Publish the app version, restricting availability to yourself.
+5. Save the App ID and App Secret for the installer.
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "docs:document.comment:create",
+      "docs:document.comment:read",
+      "docx:document",
+      "im:message.p2p_msg:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ],
+    "user": []
+  }
+}
+```
 
 ## 3. One-command Installation
 
-Use curl on Ubuntu/WSL or another common systemd Linux distribution, with Codex CLI installed. Agent CLI authentication still uses its official command:
-
-```bash
-codex login
-```
-
-Download the installer over HTTPS and run it:
+Requires curl, WSL/Linux with systemd enabled, and an installed, authenticated Codex CLI.
 
 ```bash
 curl -fsSLo /tmp/agent-message-install.sh \
@@ -54,50 +65,82 @@ curl -fsSLo /tmp/agent-message-install.sh \
 bash /tmp/agent-message-install.sh
 ```
 
-The installer sets up AgentMessage, collects Feishu credentials, and starts the background service. The default directory is `~/workspace/AgentMessage`. Rerun it to resume an interrupted installation.
-
-To use another install directory:
-
-```bash
-bash /tmp/agent-message-install.sh --install-dir /absolute/path/AgentMessage
-```
-
-If systemd is installed but inactive in WSL, the installer pauses with the required `/etc/wsl.conf` and `wsl --shutdown` instructions. Reopen WSL and run it again to resume.
+Enter the Feishu credentials when prompted. The installer sets up and starts the service in `~/workspace/AgentMessage` by default.
+See [installation details](assets/docs/installation.en.md) to rerun the installer, change credentials, or add bots.
 
 ## 4. Project Configuration
 
-The installer initially registers the AgentMessage repository itself as the default project. Add your own projects by editing:
-
-```bash
-vim ~/workspace/AgentMessage/config/projects.toml
-```
-
-Minimal project configuration:
+Edit `config/projects.toml`. This mirrors the current configuration with example identities, project names, and paths:
 
 ```toml
 [service]
+feishu_app_id = "cli_example"
 state_dir = "var"
 log_dir = "var/logs"
-default_chat_project = "website"
-codex_tool_network = false
+default_chat_project = "agent_message"
+codex_tool_network = true
+stop_grace_seconds = 10
+final_message_limit = 3500
+sandbox_git_user_name = "Alice"
+sandbox_git_user_email = "alice@example.com"
+sandbox_ssh_agent_socket = "/run/user/1000/agent-message-ssh/agent.sock"
+sandbox_ssh_known_hosts = "/home/alice/.ssh/known_hosts"
+sandbox_readonly_paths = ["/opt/quarto", "/etc/fonts"]
 
-[projects.website]
-path = "/home/alice/workspace/website"
+[projects.agent_message]
+sandbox_enabled = true
+sandbox_gpu = false
+path = "/home/alice/workspace/AgentMessage"
 default_agent = "codex"
 allowed_agents = ["codex"]
+
+[projects.planning]
+path = "/home/alice/workspace/Planning"
+default_agent = "codex"
+allowed_agents = ["codex"]
+sandbox_enabled = true
+sandbox_network = true
+sandbox_timeout_seconds = 86400
+sandbox_gpu = false
+
+[projects.training]
+path = "/home/alice/workspace/Training"
+default_agent = "codex"
+allowed_agents = ["codex"]
+sandbox_enabled = true
+sandbox_network = true
+sandbox_timeout_seconds = 86400
+sandbox_gpu = true
+
+[projects.experiments]
+path = "/home/alice/workspace/Experiments"
+default_agent = "codex"
+allowed_agents = ["codex"]
+sandbox_enabled = true
+sandbox_network = true
+sandbox_timeout_seconds = 86400
+sandbox_gpu = true
+
+[projects.container_project]
+path = "/home/alice/workspace/ContainerProject"
+default_agent = "codex"
+allowed_agents = ["codex"]
+container_name = "project_dev"
+container_path = "/root/workspace/ContainerProject"
+container_auto_start = true
+container_timeout_seconds = 86400
+
+[bots.cli_example]
+projects = ["agent_message", "planning", "training", "experiments", "container_project"]
+default_chat_project = "agent_message"
 ```
 
-- `path` must be an existing absolute local path; Feishu messages cannot submit arbitrary paths.
-- `default_agent` must be present in `allowed_agents`; only `codex` is supported.
-- Ordinary Codex tools can use the network only when `codex_tool_network = true`.
-- See [`config/projects.example.toml`](config/projects.example.toml) for all common fields.
-- See [Bubblewrap sandbox](assets/docs/sandbox-bubblewrap.en.md) for isolated execution, Git writes, optional GPU/CUDA/JAX access, and exposing host tools through `[service].sandbox_readonly_paths`.
-
-Use the restart commands at the end of this README after changing the configuration.
+Replace the App ID, paths, and Git/SSH details. Keep only the projects you need and update the `[bots]` project list. Paths must exist; remove unused `sandbox_readonly_paths` entries.
+See [runtime setup](assets/docs/runtimes.en.md) for sandbox, GPU, Git/SSH, and Docker configuration, or the [configuration example](config/projects.example.toml) for available fields. Restart the corresponding service after editing.
 
 ## 5. First Authorization
 
-After installation, send `/help` to the bot in Feishu, then inspect and authorize your own `open_id`:
+Send `/help` to the bot, then authorize your account locally:
 
 ```bash
 cd ~/workspace/AgentMessage
@@ -105,14 +148,7 @@ uv run agent-message pending-senders
 uv run agent-message authorize ou_xxx
 ```
 
-Send `/help` again. A bot response confirms the connection. Authorize only your own account.
-
-Inspect the service and logs with:
-
-```bash
-systemctl --user status agent-message --no-pager
-journalctl --user -u agent-message -f
-```
+Send `/help` again. A reply confirms the connection.
 
 ## 6. Feishu Commands
 
@@ -140,97 +176,25 @@ Send text to continue the current task; if none is selected, a conversation star
 
 Model settings apply from the next turn and persist across restarts. Send images or files directly to the Agent, or ask it to send project files back; limits are 10MB for images and 30MB for other files.
 
-Continue the same session in a terminal: `uv run agent-message resume <id>`.
+## 7. Terminal Commands
 
-## 7. Sandbox Git Setup
+Run from the installation directory: `cd ~/workspace/AgentMessage`.
 
-Configure the Git author identity and SSH authentication shared by all Bubblewrap sandbox projects:
+| Command | Purpose |
+| --- | --- |
+| `bash update.sh` | Update code, dependencies, and all bot services. |
+| `bash install.sh` | Rerun installation or add a bot. |
+| `bash install.sh --refresh-service` | Reinstall service configuration. |
+| `systemctl --user restart agent-message` | Restart the default bot. |
+| `systemctl --user status agent-message --no-pager` | Check service status. |
+| `journalctl --user -u agent-message -f` | Follow service logs. |
+| `uv run agent-message doctor` | Check configuration and runtimes. |
+| `uv run agent-message tasks` | List tasks. |
+| `uv run agent-message pending-senders` | List users awaiting authorization. |
+| `uv run agent-message authorize ou_xxx` | Authorize a user. |
+| `uv run agent-message resume <task-id>` | Resume a session in the terminal. |
+| `uv run sync-feishu-to-codex <feishu-task-id>` | Sync a Feishu session to Codex Chats. |
+| `uv run sync-codex-to-feishu "Title shown in Chats"` | Sync a Codex Chats session to Feishu; partial titles work. |
+| `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | Remove the shared installation and all bots; optional backup defaults to no. |
 
-```bash
-cd ~/workspace/AgentMessage
-uv run python scripts/configure_sandbox_git.py
-```
-
-For automatic SSH-agent startup on WSL boot, follow the [systemd setup](assets/docs/sandbox-bubblewrap.en.md#start-the-ssh-agent-automatically-with-wsl). `install.sh` installs and enables the dedicated user service by default, so no files need copying by hand; run `bash install.sh --refresh-service` to reinstall its units from the latest templates. The service scans `~/.ssh` and loads all unencrypted private keys before AgentMessage starts; linger enables startup without a terminal login and still has to be enabled by the user.
-
-Prepare a dedicated SSH agent and verified `known_hosts` file for SSH push/pull, then restart AgentMessage after saving. See the [sandbox guide](assets/docs/sandbox-bubblewrap.en.md) for setup and troubleshooting. Container Git authentication is configured separately inside the container.
-
-## 8. Docker Projects
-
-Run project commands in an existing Docker container. Bind-mount the host project directory read-write at `container_path`:
-
-```toml
-[projects.container_project]
-path = "/home/alice/workspace/container_project"
-default_agent = "codex"
-allowed_agents = ["codex"]
-container_name = "container_project_dev"
-container_path = "/workspace/container_project"
-container_auto_start = true
-container_timeout_seconds = 86400
-```
-
-```bash
-cd ~/workspace/AgentMessage
-uv run agent-message doctor --container container_project
-```
-
-A container project cannot also enable the Bubblewrap sandbox. Project commands run through the controlled `container_run` tool. Expose the Docker socket only to the trusted AgentMessage service user.
-
-## 9. Uninstall
-
-Run the uninstaller from outside the repository:
-
-```bash
-cd ~
-bash ~/workspace/AgentMessage/uninstall.sh
-```
-
-Removes AgentMessage and its service, with an optional backup of configuration, history, logs, and credentials. At the backup prompt, Enter defaults to no backup.
-
-## 10. Security and Development
-
-- Feishu credentials remain outside the repository and are removed from Codex child-process environments.
-- Register only projects the Agent may modify. Full JSONL and command logs remain local under `var/logs/`.
-- See [`AGENTS.md`](AGENTS.md) for architecture boundaries, extension recipes, and test requirements.
-
-```bash
-cd ~/workspace/AgentMessage
-uv run agent-message doctor
-uv run agent-message tasks
-```
-
-## 11. Update and Restart
-
-```bash
-cd ~/workspace/AgentMessage
-
-# Code update: pull, sync dependencies, restart both services, print service status and loaded keys
-bash update.sh
-
-# After a service in deploy/ changed (update.sh runs this itself when needed)
-bash install.sh --refresh-service
-
-# Only config/projects.toml or feishu.env changed
-systemctl --user restart agent-message
-
-# For a fuller check (configuration, agent CLIs, sandbox, Docker)
-uv run agent-message doctor
-```
-
-## 12. Synchronize Feishu and Codex Chats sessions
-
-Run these two commands from the repository directory. No Codex UUID lookup is needed:
-
-```bash
-uv run sync-feishu-to-codex <feishu-task-id>
-uv run sync-codex-to-feishu "Title shown in Chats"
-```
-
-Feishu `/list` shows the current project’s 5 newest unarchived Codex Chats titles.
-
-## 13. Planned Features
-
-- [ ] Automatically upload files to Feishu.
-- [ ] Monitor: track task progress.
-- [ ] Usage: query usage quotas.
+Append `--app-id cli_example` to CLI commands to select a bot; see [installation details](assets/docs/installation.en.md) for service names. Session sync requires an idle, unarchived session.
