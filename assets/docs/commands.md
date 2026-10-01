@@ -45,7 +45,7 @@
 | `uv run agent-message resume <任务ID>` | 在终端接续会话。 |
 | `uv run sync-feishu-to-codex <飞书任务ID>` | 将飞书会话同步到 Codex Chats。 |
 | `uv run sync-codex-to-feishu "Chats 中的对话标题"` | 将 Codex Chats 会话同步到飞书，支持部分标题。 |
-| `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | 卸载整个安装及所有机器人，可选备份；默认不备份。 |
+| `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | 交互式选择要删除的新增机器人；`a`/`all` 或加 `--yes` 卸载整个共用安装，`--app-id` 直接删除指定新增机器人。 |
 
 多机器人命令追加 `--app-id cli_example`，服务名见[安装说明](installation.md)。同步会话须空闲且未归档。
 

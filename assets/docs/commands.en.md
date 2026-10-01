@@ -45,7 +45,7 @@ Run from the installation directory: `cd ~/workspace/AgentMessage`.
 | `uv run agent-message resume <task-id>` | Resume a session in the terminal. |
 | `uv run sync-feishu-to-codex <feishu-task-id>` | Sync a Feishu session to Codex Chats. |
 | `uv run sync-codex-to-feishu "Title shown in Chats"` | Sync a Codex Chats session to Feishu; partial titles work. |
-| `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | Remove the shared installation and all bots; optional backup defaults to no. |
+| `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | Interactively select additional bots to remove; `a`/`all` or `--yes` removes the whole shared installation, and `--app-id` targets one additional bot directly. |
 
 Append `--app-id cli_example` to CLI commands to select a bot; see [installation details](installation.en.md) for service names. Session sync requires an idle, unarchived session.
 
