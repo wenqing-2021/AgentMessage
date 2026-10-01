@@ -43,10 +43,10 @@
 | `uv run agent-message pending-senders` | 查看待授权用户。 |
 | `uv run agent-message authorize ou_xxx` | 授权用户。 |
 | `uv run agent-message resume <任务ID>` | 在终端接续会话。 |
-| `uv run sync-feishu-to-codex <飞书任务ID>` | 将飞书会话同步到 Codex Chats。 |
-| `uv run sync-codex-to-feishu "Chats 中的对话标题"` | 将 Codex Chats 会话同步到飞书，支持部分标题。 |
+| `uv run sync-feishu-to-codex <飞书任务ID>` | 将飞书会话同步到 Codex Chats；多机器人时自动识别任务所属机器人。 |
+| `uv run sync-codex-to-feishu "Chats 中的对话标题"` | 将 Codex Chats 会话同步到飞书，支持部分标题；按会话所属项目自动识别机器人。 |
 | `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | 交互式选择要删除的新增机器人；`a`/`all` 或加 `--yes` 卸载整个共用安装，`--app-id` 直接删除指定新增机器人。 |
 
-多机器人命令追加 `--app-id cli_example`，服务名见[安装说明](installation.md)。同步会话须空闲且未归档。
+多机器人时其余本地命令追加 `--app-id cli_example` 选择机器人（两个同步命令会自动识别任务或会话所属机器人，显式 `--app-id` 仍然优先），服务名见[安装说明](installation.md)。同步会话须空闲且未归档。
 
 [返回 README](../../README_CN.md)

@@ -28,7 +28,7 @@ uv run agent-message authorize ou_xxx --app-id cli_second
 uv run agent-message tasks --app-id cli_second
 ```
 
-Without `--app-id`, commands select the primary bot. Run `bash update.sh` once in the shared checkout to update the code and refresh all bot services. Without `--app-id`, `bash uninstall.sh` opens the interactive selection described above; `--yes` skips it and removes the entire shared installation, including all bots; its keep-data option backs up all credentials and state. To edit an additional bot's credentials, run `bash install.sh --app-id cli_second` and choose overwrite.
+Without `--app-id`, commands select the primary bot; the two sync commands (`sync-feishu-to-codex` and `sync-codex-to-feishu`) are the exception and detect the owning bot automatically, while an explicit `--app-id` still wins. Run `bash update.sh` once in the shared checkout to update the code and refresh all bot services. Without `--app-id`, `bash uninstall.sh` opens the interactive selection described above; `--yes` skips it and removes the entire shared installation, including all bots; its keep-data option backs up all credentials and state. To edit an additional bot's credentials, run `bash install.sh --app-id cli_second` and choose overwrite.
 
 Additional bot services are named `agent-message-bot-<AppID>.service`. Manage them with `systemctl --user restart`, `status`, or `journalctl --user -u`.
 

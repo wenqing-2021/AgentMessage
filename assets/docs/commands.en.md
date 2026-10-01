@@ -43,10 +43,10 @@ Run from the installation directory: `cd ~/workspace/AgentMessage`.
 | `uv run agent-message pending-senders` | List users awaiting authorization. |
 | `uv run agent-message authorize ou_xxx` | Authorize a user. |
 | `uv run agent-message resume <task-id>` | Resume a session in the terminal. |
-| `uv run sync-feishu-to-codex <feishu-task-id>` | Sync a Feishu session to Codex Chats. |
-| `uv run sync-codex-to-feishu "Title shown in Chats"` | Sync a Codex Chats session to Feishu; partial titles work. |
+| `uv run sync-feishu-to-codex <feishu-task-id>` | Sync a Feishu session to Codex Chats; the owning bot is detected automatically. |
+| `uv run sync-codex-to-feishu "Title shown in Chats"` | Sync a Codex Chats session to Feishu; partial titles work and the owning bot is detected automatically. |
 | `cd ~ && bash ~/workspace/AgentMessage/uninstall.sh` | Interactively select additional bots to remove; `a`/`all` or `--yes` removes the whole shared installation, and `--app-id` targets one additional bot directly. |
 
-Append `--app-id cli_example` to CLI commands to select a bot; see [installation details](installation.en.md) for service names. Session sync requires an idle, unarchived session.
+Append `--app-id cli_example` to the other CLI commands to select a bot; both sync commands detect the owning bot automatically (an explicit `--app-id` still wins). See [installation details](installation.en.md) for service names. Session sync requires an idle, unarchived session.
 
 [Back to README](../../README.md)

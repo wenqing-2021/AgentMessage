@@ -538,27 +538,44 @@ def _choose_sync_target(prompt: str, labels: list[str]) -> int:
         raise ValueError("已取消同步。") from exc
 
 
+def _print_detected_bot(config: AppConfig, requested_app_id: str | None) -> None:
+    """Tell the operator which bot a shared installation resolved to."""
+    if requested_app_id is None and config.selected_app_id:
+        print(f"自动识别到机器人 {config.selected_app_id}。")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         if args.command in {"sync-feishu-to-codex", "sync-codex-to-feishu"}:
             from .agents.codex_sessions import CodexSessionStore
-            from .orchestration.session_sync import sync_codex_to_feishu, sync_feishu_to_codex
+            from .orchestration import session_sync
             import sqlite3
 
-            state = StateStore(load_config(args.config, app_id=args.app_id))
+            codex = CodexSessionStore(args.codex_home)
             try:
-                codex = CodexSessionStore(args.codex_home)
                 if args.command == "sync-feishu-to-codex":
-                    print(sync_feishu_to_codex(state, codex, args.session))
+                    config = session_sync.select_config_for_task(args.config, args.session, args.app_id)
+                    _print_detected_bot(config, args.app_id)
+                    state = StateStore(config)
+                    try:
+                        print(session_sync.sync_feishu_to_codex(state, codex, args.session))
+                    finally:
+                        state.close()
                 else:
-                    print(sync_codex_to_feishu(state, codex, args.session, args.target_task,
-                                              choose=_choose_sync_target))
+                    config, session_id = session_sync.select_config_for_codex_reference(
+                        args.config, codex, args.session, args.app_id, choose=_choose_sync_target
+                    )
+                    _print_detected_bot(config, args.app_id)
+                    state = StateStore(config)
+                    try:
+                        print(session_sync.sync_codex_to_feishu(
+                            state, codex, session_id, args.target_task, choose=_choose_sync_target))
+                    finally:
+                        state.close()
             except (ValueError, OSError, sqlite3.Error) as exc:
                 print(f"同步失败：{exc}", file=sys.stderr)
                 raise SystemExit(2) from exc
-            finally:
-                state.close()
             return
         if args.command == "doctor":
             raise SystemExit(command_doctor(args.config, args.sandbox_project, args.container, args.app_id))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sqlite3
 import tempfile
@@ -8,10 +10,18 @@ from pathlib import Path
 from uuid import uuid4
 from unittest.mock import patch
 
+from agent_message import cli
 from agent_message.agents.codex_sessions import CodexSessionStore, SessionSyncError
+from agent_message.core.bot_registry import register_bot
+from agent_message.core.config import load_config
 from agent_message.core.models import AgentKind
 from agent_message.core.state import StateStore
-from agent_message.orchestration.session_sync import sync_codex_to_feishu, sync_feishu_to_codex
+from agent_message.orchestration.session_sync import (
+    select_config_for_codex_reference,
+    select_config_for_task,
+    sync_codex_to_feishu,
+    sync_feishu_to_codex,
+)
 from agent_message.orchestration.router import MessageRouter
 from agent_message.orchestration.commands import parse_command, CommandError
 from helpers import make_config, inbound
@@ -299,6 +309,83 @@ class SessionSyncTests(unittest.TestCase):
             self.assertEqual(len(other.session_history(task.id)), 2)
         finally:
             other.close()
+
+
+class SessionSyncBotDetectionTests(unittest.TestCase):
+    """The terminal sync commands pick the bot that owns the task or session."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.config = make_config(self.root, projects=("agent_message", "alpha"))
+        register_bot(self.config.config_path, "cli_primary", "cli_second", ["agent_message"])
+        self.second = load_config(self.config.config_path, app_id="cli_second")
+
+        self.home = self.root / "codex"
+        (self.home / "sessions").mkdir(parents=True)
+        self.db = self.home / "state_5.sqlite"
+        with sqlite3.connect(self.db) as c:
+            c.execute("CREATE TABLE threads(id TEXT PRIMARY KEY, cwd TEXT, title TEXT, "
+                      "source TEXT, archived INTEGER, rollout_path TEXT)")
+        self.codex = CodexSessionStore(self.home)
+
+        self.state = StateStore(self.second)
+        self.addCleanup(self.state.close)
+        self.state.authorize("ou-1")
+        task = self.state.create_task(project_alias="agent_message", agent=AgentKind.CODEX,
+                                      chat_id="chat-1", owner_open_id="ou-1", prompt="hello")
+        self.state.stop_task(task.id, "ou-1")
+        self.task = task
+        self.session_id = self._write_session("second chat", self.second.projects["agent_message"].path)
+        self.state.set_task_session(task.id, self.session_id)
+
+    def _write_session(self, title: str, cwd: Path) -> str:
+        session_id = str(uuid4())
+        path = self.home / "sessions" / f"{session_id}.jsonl"
+        records = [
+            {"type": "session_meta", "payload": {"id": session_id, "source": "exec"}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "hello"}},
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": "world"}},
+            {"type": "event_msg", "payload": {"type": "task_complete"}},
+        ]
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        with sqlite3.connect(self.db) as c:
+            c.execute("INSERT INTO threads VALUES(?,?,?,?,?,?)",
+                      (session_id, str(cwd), title, "exec", 0, str(path)))
+        return session_id
+
+    def test_task_reference_selects_the_bot_that_stores_it(self):
+        config = select_config_for_task(self.config.config_path, self.task.id)
+        self.assertEqual(config.selected_app_id, "cli_second")
+        self.assertEqual(set(config.projects), {"agent_message"})
+
+    def test_unknown_task_lists_the_searched_bots(self):
+        with self.assertRaisesRegex(SessionSyncError, "cli_primary、cli_second"):
+            select_config_for_task(self.config.config_path, "ffffffffffff")
+
+    def test_session_reference_selects_the_bot_that_owns_its_project(self):
+        config, session_id = select_config_for_codex_reference(
+            self.config.config_path, self.codex, "second chat"
+        )
+        self.assertEqual(config.selected_app_id, "cli_second")
+        self.assertEqual(session_id, self.session_id)
+
+    def test_explicit_app_id_still_wins(self):
+        config = select_config_for_task(self.config.config_path, "ffffffffffff", "cli_primary")
+        self.assertEqual(config.selected_app_id, "cli_primary")
+        self.assertEqual(set(config.projects), {"alpha"})
+
+    def test_cli_sync_auto_detects_and_announces_the_bot(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            cli.main([
+                "sync-feishu-to-codex", self.task.id,
+                "--config", str(self.config.config_path),
+                "--codex-home", str(self.home),
+            ])
+        printed = output.getvalue()
+        self.assertIn("自动识别到机器人 cli_second", printed)
+        self.assertIn("已同步到 Codex Chats", printed)
 
 
 if __name__ == '__main__':
