@@ -19,6 +19,7 @@ STATE_FILE="$INSTALL_DIR/.git/agent-message-install-stage"
 REFRESH_SERVICE=false
 BOT_APP_ID=
 OVERWRITE=false
+SHOW_ONLY=false
 
 info() {
     printf '[AgentMessage] %s\n' "$*"
@@ -35,7 +36,7 @@ die() {
 
 usage() {
     cat <<'EOF'
-Usage: bash install.sh [--install-dir PATH] [--app-id ID] [--refresh-service]
+Usage: bash install.sh [--install-dir PATH] [--app-id ID] [--refresh-service] [--show]
 
 Clone and install AgentMessage, collect Feishu credentials, and enable its
 systemd user services. The default install directory is ~/workspace/AgentMessage.
@@ -44,6 +45,8 @@ installed and enabled together. Re-running offers overwrite, add a bot using the
 Interrupted first-time installations resume from the last completed stage.
 Use --refresh-service to reinstall the systemd units from this script and the
 deploy/ templates without repeating the other stages.
+Use --show to print the installation paths and bots without prompting; it also
+works without a terminal.
 EOF
 }
 
@@ -62,9 +65,27 @@ select_bot() {
     SSH_AGENT_DROPIN_FILE="$SSH_AGENT_DROPIN_DIR/ssh-agent.conf"
 }
 
+# The mode bits on /dev/tty stay readable without a controlling terminal, so
+# check that it can actually be opened.
+has_terminal() {
+    { exec 3<>/dev/tty; } 2>/dev/null || return 1
+    exec 3>&-
+    return 0
+}
+
+# Interactive screens must reach the terminal even when stdout is captured.
+terminal_target() {
+    if has_terminal; then
+        printf '/dev/tty'
+    else
+        printf '/dev/stdout'
+    fi
+}
+
 show_installation() {
-    printf 'Repository: %s\nProjects: %s\nCredentials: %s\nService: %s\n' \
-        "$INSTALL_DIR" "$PROJECT_CONFIG" "$ENV_FILE" "${UNIT_FILE##*/}"
+    printf 'Repository: %s\nProjects: %s\nCredentials: %s\nService: %s\nSSH agent: %s\nStage: %s\n' \
+        "$INSTALL_DIR" "$PROJECT_CONFIG" "$ENV_FILE" "${UNIT_FILE##*/}" \
+        "${SSH_AGENT_UNIT_FILE##*/}" "$(read_stage)"
     local credential app_id
     for credential in "$CONFIG_DIR/bots"/cli_*.env; do
         [[ -f $credential ]] || continue
@@ -75,7 +96,7 @@ show_installation() {
 }
 
 add_bot() {
-    local primary_id new_id new_secret aliases
+    local primary_id new_id new_secret
     [[ -x $INSTALL_DIR/.venv/bin/python && -f $PROJECT_CONFIG ]] || die "Complete the primary installation first."
     primary_id=$(read_env_value AGENT_MESSAGE_FEISHU_APP_ID)
     [[ -n $primary_id ]] || die "Complete the primary bot installation first."
@@ -87,11 +108,10 @@ add_bot() {
     prompt_secret 'New bot App Secret (input hidden)'
     new_secret=$PROMPT_VALUE
     validate_credential AGENT_MESSAGE_FEISHU_APP_SECRET "$new_secret"
-    prompt_plain "Existing project aliases for the new bot (comma-separated; keep the primary bot's default project)"
-    aliases=$PROMPT_VALUE
+    info "Sharing the agent_message project with the new bot; other projects stay with the primary bot."
     require_running_systemd_user
     "$INSTALL_DIR/.venv/bin/python" -m agent_message.core.bot_registry \
-        --config "$PROJECT_CONFIG" --primary-app-id "$primary_id" --app-id "$new_id" --projects "$aliases"
+        --config "$PROJECT_CONFIG" --primary-app-id "$primary_id" --app-id "$new_id" --projects agent_message
     select_bot "$new_id"
     write_credentials_file "$new_id" "$new_secret" ''
     # Both processes use this checkout and the same projects.toml. Reload the primary
@@ -102,16 +122,20 @@ add_bot() {
 }
 
 choose_existing_installation() {
-    show_installation
     prompt_plain 'Existing installation found: 1) Overwrite credentials and reinstall services 2) Add a bot (shared code and project configuration) 3) Show installation info and exit [3]'
-    case ${PROMPT_VALUE:-3} in
+    local selection=${PROMPT_VALUE:-3}
+    selection=${selection//[[:space:]]/}
+    case $selection in
         1) OVERWRITE=true ;;
         2)
             [[ -z $BOT_APP_ID ]] || die "Add bots from the primary installation."
             add_bot
             exit 0
             ;;
-        3) exit 0 ;;
+        3)
+            show_installation >"$(terminal_target)"
+            exit 0
+            ;;
         *) die "Invalid selection; nothing changed." ;;
     esac
 }
@@ -291,6 +315,7 @@ write_credentials_file() {
 
 prompt_plain() {
     local label=$1
+    has_terminal || die "Interactive input requires a terminal; run install.sh in a terminal."
     printf '%s: ' "$label" >/dev/tty
     if ! IFS= read -r PROMPT_VALUE </dev/tty; then
         printf '\n' >/dev/tty
@@ -300,6 +325,7 @@ prompt_plain() {
 
 prompt_secret() {
     local label=$1
+    has_terminal || die "Interactive input requires a terminal; run install.sh in a terminal."
     printf '%s: ' "$label" >/dev/tty
     if ! IFS= read -r -s PROMPT_VALUE </dev/tty; then
         printf '\n' >/dev/tty
@@ -508,6 +534,10 @@ main() {
                 REFRESH_SERVICE=true
                 shift
                 ;;
+            --show)
+                SHOW_ONLY=true
+                shift
+                ;;
             -h|--help)
                 usage
                 return 0
@@ -521,6 +551,10 @@ main() {
     [[ $INSTALL_DIR == /* ]] || die "The install directory must be an absolute path."
     [[ $INSTALL_DIR != *$'\n'* && $INSTALL_DIR != *$'\r'* ]] ||
         die "The install directory cannot contain line breaks."
+    if [[ $SHOW_ONLY == true ]]; then
+        show_installation
+        return 0
+    fi
     if [[ $REFRESH_SERVICE == true ]]; then
         [[ -d $INSTALL_DIR/.git ]] || die "$INSTALL_DIR is not an installed AgentMessage checkout."
         install_system_requirements

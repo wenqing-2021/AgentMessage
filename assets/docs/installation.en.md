@@ -12,7 +12,9 @@ If systemd is installed but inactive in WSL, the installer pauses with the requi
 
 When an installation exists, rerunning the installer offers **overwrite credentials and reinstall services**, **add a bot**, or **show installation info and exit** (default). Overwrite preserves project configuration, authorizations, and history.
 
-Choose **add a bot**, enter its App ID / App Secret, and select existing projects. The script saves the credentials and project assignments automatically; all bots share the current checkout and `config/projects.toml`. Each project belongs to one bot, and project directories assigned to different bots must not overlap. The primary bot keeps its default project and restarts when assignments change.
+Choose **add a bot** and enter its App ID / App Secret. Only `agent_message` can be shared with the new bot; every other project stays with the primary bot. The script saves credentials and assignments automatically, and all bots share the current checkout and `config/projects.toml`. After sharing, the primary bot switches its default project to one it still manages. Each project belongs to one bot, and the primary service restarts when assignments change.
+
+Without a terminal (for example when invoked by another program), interactive selection is unavailable; run `bash install.sh --show` to print the installation info.
 
 Authorize users separately for each bot and select it with `--app-id`:
 

@@ -49,11 +49,12 @@ main
             interpreter.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
             interpreter.chmod(0o755)
             shutil.copytree(ROOT / "deploy", checkout / "deploy")
-            for alias in ("alpha", "beta"):
+            for alias in ("agent_message", "alpha"):
                 (root / alias).mkdir()
             (checkout / "config/projects.toml").write_text(
-                '[service]\ndefault_chat_project = "alpha"\n' + ''.join(
-                    f'[projects.{alias}]\npath = "{root / alias}"\n' for alias in ("alpha", "beta")
+                '[service]\ndefault_chat_project = "agent_message"\n' + ''.join(
+                    f'[projects.{alias}]\npath = "{root / alias}"\n'
+                    for alias in ("agent_message", "alpha")
                 )
             )
             shell = r'''
@@ -63,7 +64,7 @@ write_credentials_file cli_primary secret_primary ou_primary
 count=0
 prompt_plain() {
     count=$((count + 1))
-    case $count in 1) PROMPT_VALUE=cli_second;; 2) PROMPT_VALUE=beta;; esac
+    case $count in 1) PROMPT_VALUE=cli_second;; esac
 }
 prompt_secret() { PROMPT_VALUE=secret_second; }
 require_running_systemd_user() { :; }
@@ -87,8 +88,72 @@ grep -F "WorkingDirectory=$INSTALL_DIR" "$UNIT_FILE"
                      "PYTHONPATH": str(ROOT / "src")},
                 capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(set(load_config(checkout / "config/projects.toml", app_id="cli_second").projects), {"beta"})
+            self.assertEqual(
+                set(load_config(checkout / "config/projects.toml", app_id="cli_second").projects),
+                {"agent_message"},
+            )
+            primary = load_config(checkout / "config/projects.toml")
+            self.assertEqual(set(primary.projects), {"alpha"})
+            self.assertEqual(primary.service.default_chat_project, "alpha")
             self.assertNotIn("secret_second", result.stdout)
+
+    def test_show_prints_installation_info_without_a_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "home"
+            checkout = root / "repo"
+            config_home = home / ".config"
+            credentials = config_home / "agent-message"
+            (credentials / "bots").mkdir(parents=True)
+            (credentials / "feishu.env").write_text(
+                "AGENT_MESSAGE_FEISHU_APP_ID=cli_primary\n"
+                "AGENT_MESSAGE_FEISHU_APP_SECRET=secret_test\n"
+            )
+            (credentials / "bots/cli_second.env").write_text(
+                "AGENT_MESSAGE_FEISHU_APP_ID=cli_second\n"
+            )
+            result = subprocess.run(
+                ["bash", str(INSTALLER), "--install-dir", str(checkout), "--show"],
+                env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(config_home)},
+                capture_output=True,
+                text=True,
+                timeout=15,
+                start_new_session=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"Repository: {checkout}", result.stdout)
+            self.assertIn("Bot: cli_second", result.stdout)
+            self.assertNotIn("secret_test", result.stdout)
+
+    def test_menu_option_three_prints_installation_info(self) -> None:
+        shell = r'''
+source "$1"
+prompt_plain() { PROMPT_VALUE=" 3 "; }
+show_installation() { printf "INSTALLATION-INFO\n"; }
+choose_existing_installation
+printf "AFTER-MENU\n"
+'''
+        result = subprocess.run(
+            ["bash", "-c", shell, "bash", str(INSTALLER)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            start_new_session=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("INSTALLATION-INFO", result.stdout)
+        self.assertNotIn("AFTER-MENU", result.stdout)
+
+    def test_interactive_prompt_requires_a_terminal(self) -> None:
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; prompt_plain "Choice"', "bash", str(INSTALLER)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            start_new_session=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires a terminal", result.stderr)
 
     def test_bash_syntax_and_help(self) -> None:
         syntax = subprocess.run(

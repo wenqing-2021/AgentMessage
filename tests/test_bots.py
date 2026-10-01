@@ -7,8 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_message.core.bot_registry import register_bot
-from agent_message.core.config import ConfigError, load_config
+from agent_message.core.bot_registry import register_bot, unregister_bot
+from agent_message.core.config import SHARED_PROJECT_ALIAS, ConfigError, load_config, tomllib
 from agent_message.core.models import AgentKind
 from agent_message.core.state import StateStore
 from agent_message.orchestration.router import MessageRouter
@@ -18,30 +18,35 @@ from tests.helpers import inbound
 class BotConfigTests(unittest.TestCase):
     def fixture(self, root: Path) -> Path:
         (root / 'config').mkdir()
-        for alias in ('alpha', 'beta', 'gamma'):
+        for alias in (SHARED_PROJECT_ALIAS, 'beta', 'gamma'):
             (root / alias).mkdir()
         path = root / 'config/projects.toml'
-        path.write_text('[service]\ndefault_chat_project = "alpha"\n' + ''.join(
-            f'\n[projects.{alias}]\npath = "{root / alias}"\n' for alias in ('alpha', 'beta', 'gamma')
+        path.write_text('[service]\ndefault_chat_project = "agent_message"\n' + ''.join(
+            f'\n[projects.{alias}]\npath = "{root / alias}"\n'
+            for alias in (SHARED_PROJECT_ALIAS, 'beta', 'gamma')
         ))
         return path
 
-    def register(self, path: Path) -> None:
-        register_bot(path, 'cli_primary', 'cli_second', ['beta'])
+    def register(self, path: Path) -> str:
+        return register_bot(path, 'cli_primary', 'cli_second', [SHARED_PROJECT_ALIAS])
 
-    def test_shared_registry_filters_projects_and_preserves_primary_state_path(self) -> None:
+    def test_shared_registry_filters_projects_and_moves_primary_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
             legacy = load_config(path)
-            self.register(path)
+            default = self.register(path)
             primary = load_config(path)
             secondary = load_config(path, app_id='cli_second')
-            self.assertEqual(set(primary.projects), {'alpha', 'gamma'})
-            self.assertEqual(set(secondary.projects), {'beta'})
+            self.assertEqual(default, 'beta')
+            self.assertEqual(set(primary.projects), {'beta', 'gamma'})
+            self.assertEqual(set(secondary.projects), {SHARED_PROJECT_ALIAS})
             self.assertEqual(primary.service.state_dir, legacy.service.state_dir)
             self.assertEqual(secondary.service.state_dir, legacy.service.state_dir / 'bots/cli_second')
             self.assertEqual(secondary.config_path, primary.config_path)
-            self.assertEqual(secondary.service.default_chat_project, 'beta')
+            self.assertEqual(secondary.service.default_chat_project, SHARED_PROJECT_ALIAS)
+            self.assertEqual(primary.service.default_chat_project, 'beta')
+            raw = tomllib.loads(path.read_text())
+            self.assertEqual(raw['service']['default_chat_project'], 'beta')
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_wrong_credentials_cannot_authorize_or_connect_another_bot(self) -> None:
@@ -65,14 +70,14 @@ class BotConfigTests(unittest.TestCase):
             try:
                 primary.authorize('ou_test')
                 self.assertFalse(second.is_authorized('ou_test'))
-                task = primary.create_task(project_alias='alpha', agent=AgentKind.CODEX,
+                task = primary.create_task(project_alias='beta', agent=AgentKind.CODEX,
                     chat_id='chat_test', owner_open_id='ou_test', prompt='hello')
                 self.assertIsNone(second.get_task(task.id))
                 primary.enqueue_outbox('chat_test', 'private reply')
                 self.assertIsNone(second.next_outbox())
                 second.authorize('ou_test')
                 router = MessageRouter(second.config, second)
-                message = replace(inbound('/new alpha forbidden'), sender_open_id='ou_test')
+                message = replace(inbound('/new beta forbidden'), sender_open_id='ou_test')
                 replies = router.handle(message)
                 self.assertIn('未知项目', '\n'.join(replies))
                 self.assertEqual(second.list_tasks(), [])
@@ -80,11 +85,11 @@ class BotConfigTests(unittest.TestCase):
                 primary.close()
                 second.close()
 
-    def test_removed_project_old_tasks_are_not_visible_or_claimed(self) -> None:
+    def test_shared_project_tasks_disappear_from_the_primary_bot(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
             state = StateStore(load_config(path))
-            task = state.create_task(project_alias='beta', agent=AgentKind.CODEX,
+            task = state.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
                 chat_id='chat_test', owner_open_id='ou_test', prompt='old queued work')
             state.close()
             self.register(path)
@@ -100,10 +105,15 @@ class BotConfigTests(unittest.TestCase):
             finally:
                 state.close()
 
-    def test_registration_is_atomic_and_rejects_invalid_or_duplicate_bots(self) -> None:
+    def test_registration_is_atomic_and_rejects_invalid_or_forbidden_bots(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
-            for app_id, aliases in (('../bad', ['beta']), ('cli_new', ['missing']), ('cli_new', ['alpha'])):
+            for app_id, aliases in (
+                ('../bad', [SHARED_PROJECT_ALIAS]),
+                ('cli_new', ['missing']),
+                ('cli_new', ['beta']),
+                ('cli_new', [SHARED_PROJECT_ALIAS, 'beta']),
+            ):
                 before = path.read_bytes()
                 with self.assertRaises(ConfigError):
                     register_bot(path, 'cli_primary', app_id, aliases)
@@ -113,27 +123,52 @@ class BotConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 self.register(path)
             self.assertEqual(path.read_bytes(), before)
-            register_bot(path, 'cli_primary', 'cli_third', ['gamma'])
-            self.assertEqual(set(load_config(path).projects), {'alpha'})
+            with self.assertRaises(ConfigError):
+                register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_config_rejects_forbidden_or_duplicate_bot_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.fixture(Path(temp))
+            base = path.read_text().replace('[service]\n', '[service]\nfeishu_app_id = "cli_primary"\n')
+            path.write_text(base + '\n[bots.cli_primary]\nprojects = ["beta", "gamma"]\n'
+                                 'default_chat_project = "beta"\n'
+                                 '\n[bots.cli_second]\nprojects = ["beta"]\ndefault_chat_project = "beta"\n')
+            with self.assertRaisesRegex(ConfigError, 'may only contain agent_message'):
+                load_config(path)
+            path.write_text(base + '\n[bots.cli_primary]\nprojects = ["agent_message", "beta"]\n'
+                                 'default_chat_project = "agent_message"\n'
+                                 '\n[bots.cli_second]\nprojects = ["agent_message"]\ndefault_chat_project = "agent_message"\n')
+            with self.assertRaisesRegex(ConfigError, 'more than one bot'):
+                load_config(path)
+            path.write_text(base + '\n[bots.cli_primary]\nprojects = ["beta", "gamma"]\n'
+                                 'default_chat_project = "beta"\n'
+                                 '\n[bots.cli_second]\nprojects = ["agent_message"]\ndefault_chat_project = "agent_message"\n')
+            self.assertEqual(set(load_config(path).projects), {'beta', 'gamma'})
+            self.assertEqual(set(load_config(path, app_id='cli_second').projects), {SHARED_PROJECT_ALIAS})
 
     def test_runtime_mcp_uses_selected_bot_state_without_credentials(self) -> None:
         from agent_message.agents.codex import sandbox_mcp_config_args
         from agent_message.runtimes.sandbox.mcp import SandboxMcpServer
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
-            path.write_text(path.read_text().replace('[projects.beta]\n', '[projects.beta]\nsandbox_enabled = true\n'))
+            path.write_text(path.read_text().replace(
+                f'[projects.{SHARED_PROJECT_ALIAS}]\n',
+                f'[projects.{SHARED_PROJECT_ALIAS}]\nsandbox_enabled = true\n',
+            ))
             self.register(path)
             config = load_config(path, app_id='cli_second')
             state = StateStore(config)
             try:
-                task = state.create_task(project_alias='beta', agent=AgentKind.CODEX,
+                task = state.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
                     chat_id='chat_test', owner_open_id='ou_test', prompt='work')
-                arguments = sandbox_mcp_config_args(config, task_id=task.id, project_alias='beta', run_id=None)
+                arguments = sandbox_mcp_config_args(
+                    config, task_id=task.id, project_alias=SHARED_PROJECT_ALIAS, run_id=None)
                 self.assertIn('"--app-id","cli_second"', ' '.join(arguments))
                 with patch.dict(os.environ, {}, clear=True):
                     server = SandboxMcpServer(str(path), task.id, None, 'cli_second')
                     try:
-                        self.assertEqual(server.project.alias, 'beta')
+                        self.assertEqual(server.project.alias, SHARED_PROJECT_ALIAS)
                         self.assertEqual(server.state.path, state.path)
                     finally:
                         server.state.close()
@@ -148,7 +183,7 @@ class BotConfigTests(unittest.TestCase):
             root = Path(temp)
             path = self.fixture(root)
             self.register(path)
-            private = root / 'alpha/private.txt'
+            private = root / 'beta/private.txt'
             private.write_text('private')
             sender = Mock()
             service = BridgeService(load_config(path, app_id='cli_second'), Mock(), send_media=sender)
@@ -160,14 +195,33 @@ class BotConfigTests(unittest.TestCase):
             finally:
                 service.state.close()
 
-    def test_unknown_bot_and_cross_bot_overlapping_paths_are_rejected(self) -> None:
+    def test_unregister_bot_returns_its_projects_to_the_primary(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
+            self.register(path)
+            returned = unregister_bot(path, 'cli_primary', 'cli_second')
+            self.assertEqual(returned, [SHARED_PROJECT_ALIAS])
+            primary = load_config(path)
+            self.assertEqual(set(primary.projects), {SHARED_PROJECT_ALIAS, 'beta', 'gamma'})
+            self.assertEqual(primary.service.default_chat_project, 'beta')
+            with self.assertRaises(ConfigError):
+                load_config(path, app_id='cli_second')
+            before = path.read_bytes()
+            with self.assertRaises(ConfigError):
+                unregister_bot(path, 'cli_primary', 'cli_second')
+            with self.assertRaises(ConfigError):
+                unregister_bot(path, 'cli_primary', 'cli_primary')
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_unknown_bot_and_cross_bot_overlapping_paths_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = self.fixture(root)
             self.register(path)
             with self.assertRaises(ConfigError):
                 load_config(path, app_id='cli_missing')
             source = path.read_text()
-            for value in (str(path.parent.parent / 'alpha'), str(path.parent.parent)):
-                path.write_text(source.replace(str(path.parent.parent / 'beta'), value))
+            for value in (str(root / SHARED_PROJECT_ALIAS), str(root)):
+                path.write_text(source.replace(str(root / 'gamma'), value))
                 with self.assertRaisesRegex(ConfigError, 'overlap'):
                     load_config(path)
