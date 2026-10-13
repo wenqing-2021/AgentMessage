@@ -69,7 +69,7 @@ class Scheduler:
         await self._send(claimed.chat_id, f"任务 {claimed.task_id} 已启动（{claimed.agent.value}）。")
         # Agents send files by running the injected project script; refresh it here
         # so long-lived projects pick up script updates with their next run.
-        ensure_send_script(claimed.project_path)
+        ensure_send_script(claimed.project_path, self.config.selected_app_id)
         try:
             token = self.state.register_agent_sync(claimed.run_id)
             install_sync_scripts(claimed.project_path, token)

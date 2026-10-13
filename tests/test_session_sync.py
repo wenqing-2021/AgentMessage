@@ -371,10 +371,36 @@ class SessionSyncBotDetectionTests(unittest.TestCase):
         self.assertEqual(config.selected_app_id, "cli_second")
         self.assertEqual(session_id, self.session_id)
 
+    def test_new_shared_session_prompts_for_destination_bot(self):
+        session_id = self._write_session("new shared chat", self.second.projects["agent_message"].path)
+        choices = []
+        def choose(prompt, labels):
+            choices.extend(labels)
+            return 1
+        config, resolved = select_config_for_codex_reference(
+            self.config.config_path, self.codex, "new shared chat", choose=choose)
+        self.assertEqual(choices, ["cli_primary", "cli_second"])
+        self.assertEqual(config.selected_app_id, "cli_second")
+        self.assertEqual(resolved, session_id)
+
+    def test_shared_session_linked_to_multiple_bots_requires_selection(self):
+        primary = StateStore(load_config(self.config.config_path))
+        try:
+            task = primary.create_task(project_alias="agent_message", agent=AgentKind.CODEX,
+                chat_id="chat-primary", owner_open_id="ou-1", prompt="hello")
+            primary.set_task_session(task.id, self.session_id)
+        finally:
+            primary.close()
+        config, _ = select_config_for_codex_reference(
+            self.config.config_path, self.codex, "second chat", choose=lambda prompt, labels: 0)
+        self.assertEqual(config.selected_app_id, "cli_primary")
+        with self.assertRaises(SessionSyncError):
+            select_config_for_codex_reference(self.config.config_path, self.codex, "second chat")
+
     def test_explicit_app_id_still_wins(self):
         config = select_config_for_task(self.config.config_path, "ffffffffffff", "cli_primary")
         self.assertEqual(config.selected_app_id, "cli_primary")
-        self.assertEqual(set(config.projects), {"alpha"})
+        self.assertEqual(set(config.projects), {"agent_message", "alpha"})
 
     def test_cli_sync_auto_detects_and_announces_the_bot(self):
         with contextlib.redirect_stdout(io.StringIO()) as output:

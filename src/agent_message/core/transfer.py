@@ -12,6 +12,7 @@ bind-mounted container.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def script_source() -> str:
     return ASSET_PATH.read_text(encoding="utf-8")
 
 
-def ensure_send_script(project_root: Path) -> Path | None:
+def ensure_send_script(project_root: Path, app_id: str | None = None) -> Path | None:
     """Install or refresh the transfer script inside the project.
 
     Returns the script path, or None when the project cannot be written (the run
@@ -37,10 +38,15 @@ def ensure_send_script(project_root: Path) -> Path | None:
     try:
         # The spool is shared with the container/sandbox runtime, which may run as
         # another UID, so both sides must be able to create and remove entries.
-        spool = spool_dir(project_root)
+        spool = spool_dir(project_root, app_id)
         spool.mkdir(parents=True, exist_ok=True)
         spool.chmod(0o777)
         source = script_source()
+        if app_id is not None:
+            source = source.replace(
+                'spool="$project_root/.agent-message/outbox"',
+                f'spool="$project_root/.agent-message/outbox/bots/{app_id}"',
+            )
         if destination.is_file() and destination.read_text(encoding="utf-8") == source:
             return destination
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -52,13 +58,18 @@ def ensure_send_script(project_root: Path) -> Path | None:
     return destination
 
 
-def spool_dir(project_root: Path) -> Path:
-    return project_root / SPOOL_DIR
+def spool_dir(project_root: Path, app_id: str | None = None) -> Path:
+    directory = project_root / SPOOL_DIR
+    if app_id is not None:
+        if not re.fullmatch(r"cli_[A-Za-z0-9_-]{1,100}", app_id):
+            raise ValueError("invalid Feishu App ID for transfer spool")
+        directory = directory / "bots" / app_id
+    return directory
 
 
-def pending_requests(project_root: Path) -> list[Path]:
+def pending_requests(project_root: Path, app_id: str | None = None) -> list[Path]:
     """List queued transfer requests, oldest first."""
-    directory = spool_dir(project_root)
+    directory = spool_dir(project_root, app_id)
     if not directory.is_dir():
         return []
     try:
@@ -108,9 +119,10 @@ def discard_request(request: Path) -> None:
 _PRUNABLE_SUFFIXES = {RESULT_SUFFIX, ".tmp"}
 
 
-def prune_results(project_root: Path, *, older_than_seconds: float, now: float) -> None:
+def prune_results(project_root: Path, *, older_than_seconds: float, now: float,
+                  app_id: str | None = None) -> None:
     """Drop leftovers whose waiting script is long gone."""
-    directory = spool_dir(project_root)
+    directory = spool_dir(project_root, app_id)
     if not directory.is_dir():
         return
     try:

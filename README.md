@@ -68,6 +68,8 @@ bash /tmp/agent-message-install.sh
 Enter the Feishu credentials when prompted. The installer sets up and starts the service in `~/workspace/AgentMessage` by default.
 See [installation details](assets/docs/installation.en.md) to rerun the installer, change credentials, or add bots.
 
+Every new bot automatically shares `agent_message`; every other project may belong to only one bot. Bot credentials, authorization, and task history remain separate.
+
 ## 4. Project Configuration
 
 Edit `config/projects.toml`. This mirrors the current configuration with example identities, project names, and paths:

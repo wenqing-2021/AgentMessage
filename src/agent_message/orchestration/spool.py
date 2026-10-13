@@ -68,10 +68,11 @@ class SpoolWatcher:
 
     async def poll_once(self) -> None:
         now = time.time()
+        app_id = self.config.selected_app_id
         for project in self.config.projects.values():
-            for request in pending_requests(project.path):
+            for request in pending_requests(project.path, app_id):
                 await self._handle(project.alias, project.path, request)
-            prune_results(project.path, older_than_seconds=_RESULT_TTL_SECONDS, now=now)
+            prune_results(project.path, older_than_seconds=_RESULT_TTL_SECONDS, now=now, app_id=app_id)
 
     async def _handle(self, project_alias: str, project_path: Path, request: Path) -> None:
         relative = read_request(request)

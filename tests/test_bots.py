@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -30,23 +32,23 @@ class BotConfigTests(unittest.TestCase):
     def register(self, path: Path) -> str:
         return register_bot(path, 'cli_primary', 'cli_second', [SHARED_PROJECT_ALIAS])
 
-    def test_shared_registry_filters_projects_and_moves_primary_default(self) -> None:
+    def test_shared_registry_preserves_primary_projects_and_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
             legacy = load_config(path)
             default = self.register(path)
             primary = load_config(path)
             secondary = load_config(path, app_id='cli_second')
-            self.assertEqual(default, 'beta')
-            self.assertEqual(set(primary.projects), {'beta', 'gamma'})
+            self.assertEqual(default, SHARED_PROJECT_ALIAS)
+            self.assertEqual(set(primary.projects), {SHARED_PROJECT_ALIAS, 'beta', 'gamma'})
             self.assertEqual(set(secondary.projects), {SHARED_PROJECT_ALIAS})
             self.assertEqual(primary.service.state_dir, legacy.service.state_dir)
             self.assertEqual(secondary.service.state_dir, legacy.service.state_dir / 'bots/cli_second')
             self.assertEqual(secondary.config_path, primary.config_path)
             self.assertEqual(secondary.service.default_chat_project, SHARED_PROJECT_ALIAS)
-            self.assertEqual(primary.service.default_chat_project, 'beta')
+            self.assertEqual(primary.service.default_chat_project, SHARED_PROJECT_ALIAS)
             raw = tomllib.loads(path.read_text())
-            self.assertEqual(raw['service']['default_chat_project'], 'beta')
+            self.assertEqual(raw['service']['default_chat_project'], SHARED_PROJECT_ALIAS)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
     def test_wrong_credentials_cannot_authorize_or_connect_another_bot(self) -> None:
@@ -93,6 +95,9 @@ class BotConfigTests(unittest.TestCase):
                 chat_id='chat_test', owner_open_id='ou_test', prompt='old queued work')
             state.close()
             self.register(path)
+            path.write_text(path.read_text().replace(
+                'projects = ["agent_message", "beta", "gamma"]', 'projects = ["beta", "gamma"]'
+            ).replace('default_chat_project = "agent_message"', 'default_chat_project = "beta"', 2))
             state = StateStore(load_config(path))
             try:
                 self.assertIsNone(state.get_task(task.id))
@@ -123,29 +128,155 @@ class BotConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 self.register(path)
             self.assertEqual(path.read_bytes(), before)
-            with self.assertRaises(ConfigError):
-                register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
-            self.assertEqual(path.read_bytes(), before)
+            register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
+            self.assertEqual(set(load_config(path, app_id='cli_third').projects), {SHARED_PROJECT_ALIAS})
 
-    def test_config_rejects_forbidden_or_duplicate_bot_assignments(self) -> None:
+    def test_config_rejects_duplicate_private_assignments_but_allows_shared_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
             base = path.read_text().replace('[service]\n', '[service]\nfeishu_app_id = "cli_primary"\n')
             path.write_text(base + '\n[bots.cli_primary]\nprojects = ["beta", "gamma"]\n'
                                  'default_chat_project = "beta"\n'
                                  '\n[bots.cli_second]\nprojects = ["beta"]\ndefault_chat_project = "beta"\n')
-            with self.assertRaisesRegex(ConfigError, 'may only contain agent_message'):
+            with self.assertRaisesRegex(ConfigError, 'more than one bot'):
                 load_config(path)
             path.write_text(base + '\n[bots.cli_primary]\nprojects = ["agent_message", "beta"]\n'
                                  'default_chat_project = "agent_message"\n'
                                  '\n[bots.cli_second]\nprojects = ["agent_message"]\ndefault_chat_project = "agent_message"\n')
-            with self.assertRaisesRegex(ConfigError, 'more than one bot'):
-                load_config(path)
+            self.assertEqual(set(load_config(path).projects), {SHARED_PROJECT_ALIAS, 'beta'})
             path.write_text(base + '\n[bots.cli_primary]\nprojects = ["beta", "gamma"]\n'
                                  'default_chat_project = "beta"\n'
                                  '\n[bots.cli_second]\nprojects = ["agent_message"]\ndefault_chat_project = "agent_message"\n')
             self.assertEqual(set(load_config(path).projects), {'beta', 'gamma'})
             self.assertEqual(set(load_config(path, app_id='cli_second').projects), {SHARED_PROJECT_ALIAS})
+            path.write_text(base + '\n[bots.cli_primary]\nprojects = ["agent_message", "gamma"]\n'
+                                 'default_chat_project = "agent_message"\n'
+                                 '\n[bots.cli_second]\nprojects = ["agent_message", "beta"]\n'
+                                 'default_chat_project = "agent_message"\n')
+            self.assertEqual(set(load_config(path, app_id='cli_second').projects), {SHARED_PROJECT_ALIAS, 'beta'})
+
+    def test_third_bot_migrates_legacy_transfer_without_changing_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.fixture(Path(temp))
+            self.register(path)
+            path.write_text(path.read_text().replace(
+                'projects = ["agent_message", "beta", "gamma"]', 'projects = ["beta", "gamma"]'
+            ).replace('default_chat_project = "agent_message"', 'default_chat_project = "beta"', 2))
+            register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
+            primary = load_config(path)
+            self.assertEqual(primary.service.default_chat_project, 'beta')
+            self.assertEqual(set(primary.projects), {SHARED_PROJECT_ALIAS, 'beta', 'gamma'})
+            unregister_bot(path, 'cli_primary', 'cli_second')
+            self.assertEqual(set(load_config(path, app_id='cli_third').projects), {SHARED_PROJECT_ALIAS})
+            self.assertIn(SHARED_PROJECT_ALIAS, load_config(path).projects)
+
+    def test_install_with_only_shared_project_supports_multiple_bots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = self.fixture(root)
+            path.write_text(path.read_text().split('[projects.beta]')[0])
+            self.register(path)
+            register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
+            for bot in ('cli_primary', 'cli_second', 'cli_third'):
+                config = load_config(path, app_id=bot)
+                self.assertEqual(set(config.projects), {SHARED_PROJECT_ALIAS})
+                self.assertEqual(config.service.default_chat_project, SHARED_PROJECT_ALIAS)
+
+    def test_shared_runs_are_serial_across_processes_but_private_projects_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.fixture(Path(temp))
+            self.register(path)
+            primary = StateStore(load_config(path))
+            second = StateStore(load_config(path, app_id='cli_second'))
+            try:
+                first_task = second.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
+                    chat_id='second_chat', owner_open_id='ou_test', prompt='shared')
+                first = second.claimed_run()
+                self.assertIsNotNone(first)
+                primary.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
+                    chat_id='primary_chat', owner_open_id='ou_test', prompt='wait')
+                probe = subprocess.run([sys.executable, '-c',
+                    'import sys; from agent_message.core.config import load_config; '
+                    'from agent_message.core.state import StateStore; '
+                    's=StateStore(load_config(sys.argv[1])); '
+                    'assert s.claimed_run() is None; s.close()', str(path)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(probe.returncode, 0, probe.stderr)
+                private_task = primary.create_task(project_alias='beta', agent=AgentKind.CODEX,
+                    chat_id='primary_chat', owner_open_id='ou_test', prompt='private')
+                private = primary.claimed_run()
+                self.assertEqual(private.task_id, private_task.id)
+                self.assertIsNone(primary.claimed_run())
+                second.finish_run(run_id=first.run_id, task_id=first_task.id,
+                    exit_code=0, session_id=None, final_message='done', error=None)
+                self.assertEqual(primary.claimed_run().project_alias, SHARED_PROJECT_ALIAS)
+            finally:
+                primary.close()
+                second.close()
+
+    def test_close_releases_shared_project_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.fixture(Path(temp))
+            self.register(path)
+            primary = StateStore(load_config(path))
+            second = StateStore(load_config(path, app_id='cli_second'))
+            try:
+                for state in (primary, second):
+                    state.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
+                        chat_id='chat_test', owner_open_id='ou_test', prompt='work')
+                self.assertIsNotNone(second.claimed_run())
+                self.assertIsNone(primary.claimed_run())
+            finally:
+                second.close()
+            try:
+                self.assertIsNotNone(primary.claimed_run())
+            finally:
+                primary.close()
+
+    def test_file_requests_are_only_consumed_by_the_originating_bot(self) -> None:
+        import asyncio
+        from agent_message.core.transfer import ensure_send_script, pending_requests, spool_dir, result_path
+        from agent_message.orchestration.spool import SpoolWatcher
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.fixture(Path(temp))
+            self.register(path)
+            register_bot(path, 'cli_primary', 'cli_third', [SHARED_PROJECT_ALIAS])
+            second = StateStore(load_config(path, app_id='cli_second'))
+            third = StateStore(load_config(path, app_id='cli_third'))
+            project = second.config.projects[SHARED_PROJECT_ALIAS].path
+            (project / 'result.txt').write_text('result')
+            delivered = []
+            async def send_media(chat, kind, file):
+                delivered.append(chat)
+            try:
+                for state, chat in ((second, 'second_chat'), (third, 'third_chat')):
+                    task = state.create_task(project_alias=SHARED_PROJECT_ALIAS, agent=AgentKind.CODEX,
+                        chat_id=chat, owner_open_id='ou_test', prompt='work')
+                    run = state.claimed_run()
+                    state.finish_run(run_id=run.run_id, task_id=task.id, exit_code=0,
+                        session_id=None, final_message='done', error=None)
+                script = ensure_send_script(project, 'cli_second')
+                completed = subprocess.run(['sh', str(script), 'result.txt', '0'], cwd=project,
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                requests = pending_requests(project, 'cli_second')
+                self.assertEqual(len(requests), 1)
+                # Refreshing the shared script cannot redirect an already queued request.
+                ensure_send_script(project, 'cli_third')
+                legacy = spool_dir(project) / 'legacy.req'
+                legacy.write_text('result.txt')
+                asyncio.run(SpoolWatcher(third.config, third, send_media).poll_once())
+                self.assertEqual(delivered, [])
+                self.assertTrue(requests[0].exists())
+                asyncio.run(SpoolWatcher(second.config, second, send_media).poll_once())
+                self.assertEqual(delivered, ['second_chat'])
+                self.assertTrue(result_path(requests[0]).read_text().startswith('ok'))
+                self.assertTrue(legacy.exists())
+                with self.assertRaises(ValueError):
+                    spool_dir(project, '../bad')
+            finally:
+                second.close()
+                third.close()
 
     def test_runtime_mcp_uses_selected_bot_state_without_credentials(self) -> None:
         from agent_message.agents.codex import sandbox_mcp_config_args
@@ -195,15 +326,15 @@ class BotConfigTests(unittest.TestCase):
             finally:
                 service.state.close()
 
-    def test_unregister_bot_returns_its_projects_to_the_primary(self) -> None:
+    def test_unregister_bot_preserves_primary_shared_access(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = self.fixture(Path(temp))
             self.register(path)
             returned = unregister_bot(path, 'cli_primary', 'cli_second')
-            self.assertEqual(returned, [SHARED_PROJECT_ALIAS])
+            self.assertEqual(returned, [])
             primary = load_config(path)
             self.assertEqual(set(primary.projects), {SHARED_PROJECT_ALIAS, 'beta', 'gamma'})
-            self.assertEqual(primary.service.default_chat_project, 'beta')
+            self.assertEqual(primary.service.default_chat_project, SHARED_PROJECT_ALIAS)
             with self.assertRaises(ConfigError):
                 load_config(path, app_id='cli_second')
             before = path.read_bytes()

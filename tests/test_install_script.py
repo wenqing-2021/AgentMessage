@@ -68,7 +68,7 @@ prompt_plain() {
 }
 prompt_secret() { PROMPT_VALUE=secret_second; }
 require_running_systemd_user() { :; }
-systemctl() { printf '%s\n' "$*" >>"$INSTALL_DIR/systemctl.log"; }
+systemctl() { local IFS=' '; printf '%s\n' "$*" >>"$INSTALL_DIR/systemctl.log"; }
 bootstrap_project() { exit 90; }
 checkout_project() { exit 91; }
 install_user_service() { write_user_service_file; }
@@ -82,6 +82,13 @@ grep -q -- '--app-id "cli_second"' "$UNIT_FILE"
 grep -F "WorkingDirectory=$INSTALL_DIR" "$UNIT_FILE"
 [[ $SSH_AGENT_UNIT_FILE == "$SYSTEMD_USER_DIR/agent-message-ssh-agent.service" ]]
 [[ $(stat -c %a "$ENV_FILE") == 600 ]]
+BOT_APP_ID=
+ENV_FILE="$CONFIG_DIR/feishu.env"
+prompt_plain() { PROMPT_VALUE=cli_third; }
+prompt_secret() { PROMPT_VALUE=secret_third; }
+add_bot
+grep -q secret_third "$CONFIG_DIR/bots/cli_third.env"
+grep -q -- '--user restart agent-message-bot-cli_second.service' "$INSTALL_DIR/systemctl.log"
 '''
             result = subprocess.run(["bash", "-c", shell, "bash", str(INSTALLER), str(checkout)],
                 env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
@@ -93,8 +100,11 @@ grep -F "WorkingDirectory=$INSTALL_DIR" "$UNIT_FILE"
                 {"agent_message"},
             )
             primary = load_config(checkout / "config/projects.toml")
-            self.assertEqual(set(primary.projects), {"alpha"})
-            self.assertEqual(primary.service.default_chat_project, "alpha")
+            self.assertEqual(set(primary.projects), {"agent_message", "alpha"})
+            self.assertEqual(primary.service.default_chat_project, "agent_message")
+            self.assertEqual(set(load_config(checkout / "config/projects.toml", app_id="cli_third").projects),
+                             {"agent_message"})
+            self.assertNotIn("secret_third", result.stdout)
             self.assertNotIn("secret_second", result.stdout)
 
     def test_show_prints_installation_info_without_a_terminal(self) -> None:

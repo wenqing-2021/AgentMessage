@@ -108,15 +108,22 @@ add_bot() {
     prompt_secret 'New bot App Secret (input hidden)'
     new_secret=$PROMPT_VALUE
     validate_credential AGENT_MESSAGE_FEISHU_APP_SECRET "$new_secret"
-    info "Sharing the agent_message project with the new bot; other projects stay with the primary bot."
+    info "Sharing agent_message with the new bot; other project assignments stay unchanged."
     require_running_systemd_user
     "$INSTALL_DIR/.venv/bin/python" -m agent_message.core.bot_registry \
         --config "$PROJECT_CONFIG" --primary-app-id "$primary_id" --app-id "$new_id" --projects agent_message
     select_bot "$new_id"
     write_credentials_file "$new_id" "$new_secret" ''
-    # Both processes use this checkout and the same projects.toml. Reload the primary
-    # bridge before starting the new one so its previous project whitelist is gone.
+    # Reload every existing bridge so all use shared-project locks and isolated spools.
     systemctl --user restart agent-message.service
+    local credential existing_id
+    for credential in "$CONFIG_DIR/bots"/cli_*.env; do
+        [[ -f $credential ]] || continue
+        existing_id=${credential##*/}
+        existing_id=${existing_id%.env}
+        [[ $existing_id == "$new_id" ]] && continue
+        systemctl --user restart "agent-message-bot-$existing_id.service"
+    done
     install_user_service
     print_summary
 }

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
+import os
 import shlex
 import sqlite3
 import threading
@@ -43,6 +45,7 @@ class StateStore:
         config.service.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = config.service.state_dir / "agent-message.sqlite3"
         self._lock = threading.RLock()
+        self._project_locks: dict[str, int] = {}
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys = ON")
@@ -60,6 +63,9 @@ class StateStore:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+            for fd in self._project_locks.values():
+                os.close(fd)
+            self._project_locks.clear()
 
     def _migrate(self) -> None:
         with self._lock, self._connection:
@@ -654,7 +660,7 @@ class StateStore:
     def claimed_run(self) -> ClaimedRun | None:
         """Atomically claim the oldest queued message whose project is not running."""
         with self._lock, self._connection:
-            row = self._connection.execute(
+            rows = self._connection.execute(
                 """
                 SELECT m.id AS message_id, m.task_id, m.content, m.operation, t.project_alias, t.agent,
                        t.session_id, t.chat_id
@@ -667,57 +673,91 @@ class StateStore:
                     WHERE active.project_alias = t.project_alias AND active.status = ?
                   )
                 ORDER BY m.created_at, m.id
-                LIMIT 1
                 """,
                 (MessageStatus.QUEUED.value, TaskStatus.STOPPED.value, TaskStatus.RUNNING.value),
-            ).fetchone()
-            if row is None:
-                return None
-            project = self.config.projects[row["project_alias"]]
-            timestamp = _now()
-            self._connection.execute(
-                "UPDATE task_messages SET status = ?, started_at = ? WHERE id = ? AND status = ?",
-                (MessageStatus.RUNNING.value, timestamp, row["message_id"], MessageStatus.QUEUED.value),
-            )
-            self._connection.execute(
-                "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
-                (TaskStatus.RUNNING.value, timestamp, row["task_id"]),
-            )
-            run_cursor = self._connection.execute(
-                """
-                INSERT INTO runs(task_id, message_id, status, log_path, started_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    row["task_id"],
-                    row["message_id"],
-                    "running",
-                    str(self.config.service.log_dir / row["task_id"] / f"pending-{row['message_id']}.jsonl"),
-                    timestamp,
-                ),
-            )
-            run_id = int(run_cursor.lastrowid)
-            log_path = self.config.service.log_dir / row["task_id"] / f"run-{run_id}.jsonl"
-            self._connection.execute("UPDATE runs SET log_path = ? WHERE id = ?", (str(log_path), run_id))
-            model_row = self._connection.execute(
-                "SELECT value FROM settings WHERE key = 'codex_model'"
-            ).fetchone()
-            model = str(model_row["value"]) if model_row is not None else None
-            return ClaimedRun(
-                run_id=run_id,
-                task_id=row["task_id"],
-                message_id=int(row["message_id"]),
-                project_alias=row["project_alias"],
-                project_path=project.path,
-                agent=AgentKind(row["agent"]),
-                session_id=row["session_id"],
-                prompt=row["content"],
-                chat_id=row["chat_id"],
-                log_path=log_path,
-                model=model,
-                reasoning_effort=self.get_setting("codex_reasoning_effort"),
-                operation=row["operation"],
-            )
+            ).fetchall()
+            for row in rows:
+                fd = self._acquire_project_lock(row["project_alias"])
+                if fd == -1:
+                    continue
+                try:
+                    claimed = self._claim_row(row)
+                except BaseException:
+                    if fd is not None:
+                        os.close(fd)
+                    raise
+                if fd is not None:
+                    self._project_locks[claimed.task_id] = fd
+                return claimed
+            return None
+
+    def _acquire_project_lock(self, alias: str) -> int | None:
+        """Hold a host-side lock across the run when multiple bots share a project."""
+        if sum(alias in bot.projects for bot in self.config.bots.values()) < 2:
+            return None
+        directory = self.config.service.state_dir
+        if self.config.selected_app_id != self.config.primary_app_id:
+            directory = directory.parent.parent
+        directory = directory / "project-locks"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        name = hashlib.sha256(str(self.config.projects[alias].path.resolve()).encode()).hexdigest()
+        fd = os.open(directory / f"{name}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return -1
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    def _claim_row(self, row: sqlite3.Row) -> ClaimedRun:
+        project = self.config.projects[row["project_alias"]]
+        timestamp = _now()
+        self._connection.execute(
+            "UPDATE task_messages SET status = ?, started_at = ? WHERE id = ? AND status = ?",
+            (MessageStatus.RUNNING.value, timestamp, row["message_id"], MessageStatus.QUEUED.value),
+        )
+        self._connection.execute(
+            "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
+            (TaskStatus.RUNNING.value, timestamp, row["task_id"]),
+        )
+        run_cursor = self._connection.execute(
+            """
+            INSERT INTO runs(task_id, message_id, status, log_path, started_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                row["task_id"],
+                row["message_id"],
+                "running",
+                str(self.config.service.log_dir / row["task_id"] / f"pending-{row['message_id']}.jsonl"),
+                timestamp,
+            ),
+        )
+        run_id = int(run_cursor.lastrowid)
+        log_path = self.config.service.log_dir / row["task_id"] / f"run-{run_id}.jsonl"
+        self._connection.execute("UPDATE runs SET log_path = ? WHERE id = ?", (str(log_path), run_id))
+        model_row = self._connection.execute(
+            "SELECT value FROM settings WHERE key = 'codex_model'"
+        ).fetchone()
+        model = str(model_row["value"]) if model_row is not None else None
+        return ClaimedRun(
+            run_id=run_id,
+            task_id=row["task_id"],
+            message_id=int(row["message_id"]),
+            project_alias=row["project_alias"],
+            project_path=project.path,
+            agent=AgentKind(row["agent"]),
+            session_id=row["session_id"],
+            prompt=row["content"],
+            chat_id=row["chat_id"],
+            log_path=log_path,
+            model=model,
+            reasoning_effort=self.get_setting("codex_reasoning_effort"),
+            operation=row["operation"],
+        )
 
     def set_run_pid(self, run_id: int, pid: int) -> None:
         with self._lock, self._connection:
@@ -1059,7 +1099,12 @@ class StateStore:
                 (next_status.value, session_id, final_message, timestamp, task_id),
             )
             row = self._connection.execute("SELECT * FROM codex_tasks WHERE id = ?", (task_id,)).fetchone()
-            return self._row_to_task(row)
+            task = self._row_to_task(row)
+        with self._lock:
+            fd = self._project_locks.pop(task_id, None)
+            if fd is not None:
+                os.close(fd)
+        return task
 
     def recover_interrupted(self) -> list[Task]:
         timestamp = _now()

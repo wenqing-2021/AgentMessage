@@ -44,11 +44,11 @@ container_timeout_seconds = 86400
 # Optional shared-code multi-bot setup. App IDs are public identifiers; Secrets stay
 # in separate chmod-600 environment files. Add feishu_app_id = "cli_primary" to
 # [service], then uncomment these tables. Only agent_message may be shared with a
-# bot other than the primary one; all other projects stay with the primary bot,
-# which switches its default project automatically when agent_message moves.
+# new bot by default; every other project may belong to only one bot.
+# agent_message stays available to all bots, with separate state and authorization.
 # Existing single-bot configs continue to work without any of these entries.
 # [bots.cli_primary]
-# projects = ["container_project"]
+# projects = ["agent_message", "container_project"]
 # default_chat_project = "container_project"
 #
 # [bots.cli_second]

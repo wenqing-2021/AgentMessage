@@ -21,6 +21,10 @@ def _bot_configs(base: AppConfig, config_path: str | Path) -> list[AppConfig]:
 
 
 def _state_contains_task(config: AppConfig, task_id: str) -> bool:
+    return _state_contains_reference(config, "id", task_id)
+
+
+def _state_contains_reference(config: AppConfig, column: str, value: str) -> bool:
     database = config.service.state_dir / 'agent-message.sqlite3'
     if not database.is_file():
         return False
@@ -30,7 +34,7 @@ def _state_contains_task(config: AppConfig, task_id: str) -> bool:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone() is None:
             return False
-        row = connection.execute('SELECT 1 FROM tasks WHERE id=?', (task_id,)).fetchone()
+        row = connection.execute(f'SELECT 1 FROM tasks WHERE {column}=?', (value,)).fetchone()
         return row is not None
     except sqlite3.Error:
         return False
@@ -116,7 +120,15 @@ def select_config_for_codex_reference(
         return matches[0], session.id
     if not matches:
         raise SessionSyncError(f'session 工作目录不在已配置的项目白名单中：{session.cwd}')
-    raise SessionSyncError('session 的工作目录同时属于多个机器人；请用 --app-id 指定机器人。')
+    # A shared cwd alone cannot identify the bot. Prefer its existing task history;
+    # a new session requires the user to choose a destination bot.
+    linked = [config for config in matches if _state_contains_reference(config, "session_id", session.id)]
+    if len(linked) == 1:
+        return linked[0], session.id
+    candidates = linked or matches
+    index = _select('请选择同步到哪个机器人',
+                    [config.selected_app_id or '默认机器人' for config in candidates], choose)
+    return candidates[index], session.id
 
 
 def sync_feishu_to_codex(state: StateStore, codex: CodexSessionStore, task_id: str) -> str:

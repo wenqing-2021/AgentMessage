@@ -68,6 +68,8 @@ bash /tmp/agent-message-install.sh
 按提示输入飞书凭证，脚本自动安装并启动服务。默认目录：`~/workspace/AgentMessage`。
 重复安装、修改凭证或新增机器人见[安装说明](assets/docs/installation.md)。
 
+所有新增机器人默认共享 `agent_message`，其他项目最多分配给一个机器人。各机器人的凭证、用户授权和任务历史分别保存。
+
 ## 4. 项目配置
 
 编辑 `config/projects.toml`。下面按当前配置展示，身份、项目名和路径已替换为示例值：

@@ -412,28 +412,26 @@ def load_config(path: str | Path, *, app_id: str | None = None) -> AppConfig:
             default_alias = bot_raw.get("default_chat_project", aliases[0])
             if not isinstance(default_alias, str) or default_alias not in aliases:
                 raise ConfigError(f"bots.{bot_id}.default_chat_project must belong to its projects")
-            if bot_id != primary_app_id and any(
-                alias != SHARED_PROJECT_ALIAS for alias in aliases
-            ):
-                raise ConfigError(
-                    f"bots.{bot_id}.projects may only contain {SHARED_PROJECT_ALIAS}; "
-                    "all other projects stay with the primary bot"
-                )
             bots[bot_id] = BotConfig(bot_id, tuple(aliases), default_alias)
-        owners: dict[str, tuple[Path, str]] = {}
+        owners: list[tuple[str, Path, str]] = []
         for bot in bots.values():
             for alias in bot.projects:
+                # All bots may share this one project. Other aliases and physical
+                # paths must remain exclusive, including paths nested inside it.
                 path = projects[alias].path
-                previous = owners.get(alias)
-                if previous is not None and previous[1] != bot.app_id:
+                if alias != SHARED_PROJECT_ALIAS and any(
+                    alias == other_alias and owner != bot.app_id
+                    for other_alias, _, owner in owners
+                ):
                     raise ConfigError(f"project {alias} is assigned to more than one bot")
                 if any(
                     owner != bot.app_id
+                    and not (alias == other_alias == SHARED_PROJECT_ALIAS)
                     and (path == other or path.is_relative_to(other) or other.is_relative_to(path))
-                    for other, owner in owners.values()
+                    for other_alias, other, owner in owners
                 ):
                     raise ConfigError("projects assigned to different bots must not overlap on disk")
-                owners[alias] = (path, bot.app_id)
+                owners.append((alias, path, bot.app_id))
     elif primary_app_id is not None:
         raise ConfigError("[service].feishu_app_id requires [bots.<app_id>] entries")
 

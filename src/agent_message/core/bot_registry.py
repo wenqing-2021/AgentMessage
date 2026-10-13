@@ -60,15 +60,12 @@ def register_bot(path: Path, primary_app_id: str, app_id: str, aliases: list[str
         default = service.get("default_chat_project")
         if not isinstance(default, str):
             raise ConfigError("[service].default_chat_project is missing")
-    if SHARED_PROJECT_ALIAS not in old_projects:
-        raise ConfigError(
-            f"the primary bot does not manage {SHARED_PROJECT_ALIAS}; it may already be shared"
-        )
-    remaining = [alias for alias in old_projects if alias not in aliases]
-    if not remaining:
-        raise ConfigError("the primary bot must keep at least one project")
-    # The primary bot cannot keep a default project that moved to the new bot.
-    new_default = default if default in remaining else remaining[0]
+    # Preserve existing assignments and migrate older registries that transferred
+    # agent_message away from the primary bot instead of sharing it.
+    remaining = list(old_projects)
+    if SHARED_PROJECT_ALIAS not in remaining:
+        remaining.append(SHARED_PROJECT_ALIAS)
+    new_default = default
     if not registry:
         source, count = re.subn(r"(?m)^\[service\][ \t]*(?:#.*)?$",
                                f'[service]\nfeishu_app_id = {json.dumps(primary_app_id)}', source, count=1)
@@ -99,7 +96,7 @@ def register_bot(path: Path, primary_app_id: str, app_id: str, aliases: list[str
 
 
 def unregister_bot(path: Path, primary_app_id: str, app_id: str) -> list[str]:
-    """Remove one registered bot and return its projects to the primary bot."""
+    """Remove one registered bot without changing other bots' shared access."""
     for value in (primary_app_id, app_id):
         if not re.fullmatch(r"cli_[A-Za-z0-9_-]{1,100}", value):
             raise ConfigError("invalid Feishu App ID")
